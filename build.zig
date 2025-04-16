@@ -24,7 +24,8 @@ const X11INC = "/usr/include/X11";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
+    // const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
+    const optimize = b.standardOptimizeOption(.{});
 
     //dependencies
     // ==============================================================//
@@ -53,6 +54,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.addIncludePath(b.path("./include/"));
+    exe.addIncludePath(b.path("./config/"));
     exe.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
     exe.linkSystemLibrary("freetype2");
     exe.linkSystemLibrary("fontconfig");
