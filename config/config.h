@@ -1,10 +1,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
+#include <stdbool.h>
+#include <stdint.h>
 
 
-
-//TODO:make in zig
-#define LEN(a)	(sizeof(a) / sizeof(a)[0])
 
 /*
  * appearance
@@ -13,38 +12,74 @@
  */
 static char *font = "Liberation Mono:pixelsize=12";
 
-static int borderpx = 2;
+static uint32_t borderpx = 2;
 
-/* Terminal colors (16 first used in escape sequence) */
+// /* Terminal colors (16 first used in escape sequence) */
+// static const char *colorname[] = {
+// 	/* 8 normal colors */
+// 	"black",
+// 	"red3",
+// 	"green3",
+// 	"yellow3",
+// 	"blue2",
+// 	"magenta3",
+// 	"cyan3",
+// 	"gray90",
+
+// 	/* 8 bright colors */
+// 	"gray50",
+// 	"red",
+// 	"green",
+// 	"yellow",
+// 	"#5c5cff",
+// 	"magenta",
+// 	"cyan",
+// 	"white",
+
+// 	[255] = 0,
+
+// 	/* more colors can be added after 255 to use with DefaultXX */
+// 	"#cccccc",
+// 	"#555555",
+// 	"gray90", /* default foreground colour */
+// 	"black", /* default background colour */
+// };
+
+
+//gruber-darker
+//
 static const char *colorname[] = {
-	/* 8 normal colors */
-	"black",
-	"red3",
-	"green3",
-	"yellow3",
-	"blue2",
-	"magenta3",
-	"cyan3",
-	"gray90",
+    /* 8 normal colors */
+    "#181818", /* black */
+    "#F43841", /* red */
+    "#73D936", /* green */
+    "#FFDD33", /* yellow */
+    "#96A6C8", /* blue */
+    "#9E95C7", /* magenta */
+    "#95A99F", /* cyan */
+    "#E4E4E4", /* white */
 
-	/* 8 bright colors */
-	"gray50",
-	"red",
-	"green",
-	"yellow",
-	"#5c5cff",
-	"magenta",
-	"cyan",
-	"white",
+    /* 8 bright colors */
+    "#52494E", /* bright black */
+    "#FF4F58", /* bright red */
+    "#73D936", /* bright green */
+    "#FFDD33", /* bright yellow */
+    "#96A6C8", /* bright blue */
+    "#AFAFD7", /* bright magenta */
+    "#95A99F", /* bright cyan */
+    "#F5F5F5", /* bright white */
 
-	[255] = 0,
+    [16] = "#222222", /* indexed color 16 */
 
-	/* more colors can be added after 255 to use with DefaultXX */
-	"#cccccc",
-	"#555555",
-	"gray90", /* default foreground colour */
-	"black", /* default background colour */
+    [255] = 0,
+
+    /* special colors */
+    "#E4E4E4",
+    "#181818", /* 257 -> reverse cursor (background) */
+    "#181818", /* 258 -> background */
+    "#e4e4ef", /* 259 -> foreground */
 };
+
 
 
 
@@ -56,6 +91,8 @@ unsigned int defaultfg = 258;
 unsigned int defaultbg = 259;
 unsigned int defaultcs = 256;
 static unsigned int defaultrcs = 257;
+
+static bool scroll_bool = true;
 
 
 
@@ -78,8 +115,8 @@ static unsigned int mousebg = 0;
 
 
 
-static unsigned int cols = 80;
-static unsigned int rows = 24;
+static unsigned char cols = 80;
+static unsigned char rows = 24;
 
 
 

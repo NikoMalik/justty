@@ -4,6 +4,7 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const log = std.log;
 const xlib = @import("x.zig");
+const util = @import("util.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -127,7 +128,7 @@ pub const Pty = struct {
         }
     }
 
-    fn getShellPath() [:0]const u8 {
+    inline fn getShellPath() [:0]const u8 {
         if (std.posix.getenv("SHELL")) |shell| return shell;
 
         const uid = pty.getuid();
@@ -162,10 +163,25 @@ pub const Pty = struct {
 };
 
 pub fn main() !void {
-    std.debug.print("hello ", .{});
-    std.debug.print("font : {s}", .{c.font});
+    if (comptime util.isDebug) {
+        var alloc = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+        defer _ = alloc.deinit();
+        const allocator = alloc.allocator();
+        _ = c.setlocale(c.LC_CTYPE, "");
+        _ = c.XSetLocaleModifiers("");
+        std.debug.print("hello ", .{});
+        std.debug.print("font : {s}\n", .{c.font});
 
-    var term = try xlib.XlibTerminal.init();
-    defer term.deinit();
-    try term.run();
+        var term = try xlib.XlibTerminal.init(allocator);
+        defer term.deinit();
+        try term.run();
+    } else {
+        const allocator = std.heap.c_allocator;
+        _ = c.setlocale(c.LC_CTYPE, "");
+        _ = c.XSetLocaleModifiers("");
+
+        var term = try xlib.XlibTerminal.init(allocator);
+        defer term.deinit();
+        try term.run();
+    }
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 //========================// *debug options //====================
+
 pub const isDebug = std.builtin.Mode.Debug == builtin.mode;
 pub const isRelease = std.builtin.Mode.Debug != builtin.mode and !isTest;
 pub const isTest = builtin.is_test;
