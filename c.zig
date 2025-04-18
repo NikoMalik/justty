@@ -6,6 +6,14 @@ pub usingnamespace @cImport({
     @cInclude("X11/Xft/Xft.h");
     @cInclude("X11/XKBlib.h");
     @cInclude("sys/ioctl.h");
+    @cInclude("xcb/xcb.h");
+    @cInclude("xcb/xcb_keysyms.h");
     @cInclude("locale.h");
     @cInclude("config.h");
+    @cInclude("ft2build.h");
+    @cInclude("X11/Xlib-xcb.h");
+    @cInclude("freetype/ftmm.h");
+    @cInclude("freetype/ftoutln.h");
+    @cInclude("freetype/ftsnames.h");
+    @cInclude("freetype/ttnameid.h");
 });

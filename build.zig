@@ -25,7 +25,7 @@ const X11INC = "/usr/include/X11";
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
+    const optimize = b.standardOptimizeOption(.{});
 
     //dependencies
     // ==============================================================//
@@ -60,6 +60,9 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("fontconfig");
     exe.linkSystemLibrary("X11");
     exe.linkSystemLibrary("xinerama");
+    exe.linkSystemLibrary("xcb");
+    exe.linkSystemLibrary2("freetype2", .{});
+
     exe.linkSystemLibrary("freetype");
     exe.linkSystemLibrary("Xft");
     b.installArtifact(exe);
@@ -84,6 +87,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.linkSystemLibrary("xinerama");
     unit_tests.linkSystemLibrary("freetype");
     unit_tests.linkSystemLibrary("Xft");
+    unit_tests.linkSystemLibrary("xcb");
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
