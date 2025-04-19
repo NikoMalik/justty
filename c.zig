@@ -7,6 +7,7 @@ pub usingnamespace @cImport({
     @cInclude("X11/XKBlib.h");
     @cInclude("sys/ioctl.h");
     @cInclude("xcb/xcb.h");
+    @cInclude("xcb/xcb_cursor.h");
     @cInclude("xcb/xcb_keysyms.h");
     @cInclude("locale.h");
     @cInclude("config.h");
