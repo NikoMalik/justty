@@ -17,4 +17,5 @@ pub usingnamespace @cImport({
     @cInclude("freetype/ftoutln.h");
     @cInclude("freetype/ftsnames.h");
     @cInclude("freetype/ttnameid.h");
+    @cInclude("sys/select.h");
 });

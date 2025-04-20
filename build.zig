@@ -62,6 +62,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("xinerama");
     exe.linkSystemLibrary("xcb");
     exe.linkSystemLibrary2("freetype2", .{});
+    exe.linkSystemLibrary("xcb-cursor");
 
     exe.linkSystemLibrary("freetype");
     exe.linkSystemLibrary("Xft");
@@ -80,6 +81,8 @@ pub fn build(b: *std.Build) void {
     });
 
     unit_tests.addIncludePath(b.path("./include/"));
+    unit_tests.linkSystemLibrary("xcb-cursor");
+
     unit_tests.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
     unit_tests.linkSystemLibrary("freetype2");
     unit_tests.linkSystemLibrary("fontconfig");
