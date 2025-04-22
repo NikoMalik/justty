@@ -17,8 +17,8 @@ pub const winsize = c.winsize;
 
 //=========================//* utf consts //=======================
 const UTF_INVALID = 0xFFFD;
-const UTF_SIZ = 4;
 const ESC_BUF_SIZ = 128 * UTF_SIZ;
+const UTF_SIZ = 4;
 
 const ESC_ARG_SIZ = 16;
 const STR_BUF_SIZ = ESC_BUF_SIZ;
@@ -168,7 +168,7 @@ pub fn main() !void {
         defer _ = alloc.deinit();
         const allocator = alloc.allocator();
         _ = c.setlocale(c.LC_CTYPE, "");
-        _ = c.XSetLocaleModifiers("");
+        // _ = c.XSetLocaleModifiers("");
         std.debug.print("hello ", .{});
         std.debug.print("font : {s}\n", .{c.font});
 
@@ -178,7 +178,7 @@ pub fn main() !void {
     } else {
         const allocator = std.heap.c_allocator;
         _ = c.setlocale(c.LC_CTYPE, "");
-        _ = c.XSetLocaleModifiers("");
+        // _ = c.XSetLocaleModifiers("");
 
         var term = try xlib.XlibTerminal.init(allocator);
         defer term.deinit();

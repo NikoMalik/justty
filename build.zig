@@ -58,10 +58,10 @@ pub fn build(b: *std.Build) void {
     exe.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
     exe.linkSystemLibrary("freetype2");
     exe.linkSystemLibrary("fontconfig");
-    exe.linkSystemLibrary("X11");
+    // exe.linkSystemLibrary("X11");
     exe.linkSystemLibrary("xinerama");
     exe.linkSystemLibrary("xcb");
-    exe.linkSystemLibrary2("freetype2", .{});
+    // exe.linkSystemLibrary2("freetype2", .{});
     exe.linkSystemLibrary("xcb-cursor");
 
     exe.linkSystemLibrary("freetype");

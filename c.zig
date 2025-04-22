@@ -1,10 +1,10 @@
 pub usingnamespace @cImport({
-    @cInclude("X11/Xatom.h");
-    @cInclude("X11/Xlib.h");
-    @cInclude("X11/cursorfont.h");
-    @cInclude("X11/keysym.h");
-    @cInclude("X11/Xft/Xft.h");
-    @cInclude("X11/XKBlib.h");
+    // @cInclude("X11/Xatom.h");
+    // @cInclude("X11/Xlib.h");
+    // @cInclude("X11/cursorfont.h");
+    // @cInclude("X11/keysym.h");
+    // @cInclude("X11/Xft/Xft.h");
+    // @cInclude("X11/XKBlib.h");
     @cInclude("sys/ioctl.h");
     @cInclude("xcb/xcb.h");
     @cInclude("xcb/xcb_cursor.h");
@@ -12,7 +12,8 @@ pub usingnamespace @cImport({
     @cInclude("locale.h");
     @cInclude("config.h");
     @cInclude("ft2build.h");
-    @cInclude("X11/Xlib-xcb.h");
+    @cInclude("fontconfig/fontconfig.h");
+    // @cInclude("X11/Xlib-xcb.h");
     @cInclude("freetype/ftmm.h");
     @cInclude("freetype/ftoutln.h");
     @cInclude("freetype/ftsnames.h");
