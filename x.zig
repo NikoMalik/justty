@@ -18,12 +18,197 @@ const Allocator = std.mem.Allocator;
 //
 //root_window
 //└── main_window
-//    └── vt_window
 
 const Key = packed struct(u64) {
     key_sym: c.xcb_keysym_t,
     mode: u32,
 };
+
+const GLyphMode = std.bit_set.IntegerBitSet(13);
+
+const Glyph_flags = enum(u5) {
+    ATTR_NULL = 0,
+    ATTR_BOLD = 1,
+    ATTR_FAINT = 2,
+    ATTR_ITALIC = 3,
+    ATTR_UNDERLINE = 4,
+    ATTR_BLINK = 5,
+    ATTR_REVERSE = 6,
+    ATTR_INVISIBLE = 7,
+    ATTR_STRUCK = 8,
+    ATTR_WRAP = 8,
+    ATTR_WIDE = 10,
+    ATTR_WDUMMY = 11,
+    ATTR_BOLD_FAINT = 12,
+};
+
+const WinMode = std.bit_set.IntegerBitSet(19);
+
+const WinModeFlags = enum(u5) {
+    MODE_VISIBLE = 0,
+    MODE_FOCUSED = 1,
+    MODE_APPKEYPAD = 2,
+    MODE_MOUSEBTN = 3,
+    MODE_MOUSEMOTION = 4,
+    MODE_REVERSE = 5,
+    MODE_KBDLOCK = 6,
+    MODE_HIDE = 7,
+    MODE_APPCURSOR = 8,
+    MODE_MOUSESGR = 9,
+    MODE_8BIT = 10,
+    MODE_BLINK = 11,
+    MODE_FBLINK = 12,
+    MODE_FOCUS = 13,
+    MODE_MOUSEX10 = 14,
+    MODE_MOUSEMANY = 15,
+    MODE_BRCKTPASTE = 16,
+    MODE_NUMLOCK = 17,
+    MODE_MOUSE = 18,
+};
+
+// const win_mode = union(enum(u32)) {
+//     MODE_VISIBLE = 1 << 0,
+//     MODE_FOCUSED = 1 << 1,
+//     MODE_APPKEYPAD = 1 << 2,
+//     MODE_MOUSEBTN = 1 << 3,
+//     MODE_MOUSEMOTION = 1 << 4,
+//     MODE_REVERSE = 1 << 5,
+//     MODE_KBDLOCK = 1 << 6,
+//     MODE_HIDE = 1 << 7,
+//     MODE_APPCURSOR = 1 << 8,
+//     MODE_MOUSESGR = 1 << 9,
+//     MODE_8BIT = 1 << 10,
+//     MODE_BLINK = 1 << 11,
+//     MODE_FBLINK = 1 << 12,
+//     MODE_FOCUS = 1 << 13,
+//     MODE_MOUSEX10 = 1 << 14,
+//     MODE_MOUSEMANY = 1 << 15,
+//     MODE_BRCKTPASTE = 1 << 16,
+//     MODE_NUMLOCK = 1 << 17,
+//     MODE_MOUSE = 1 << 3 | 1 << 4 | 1 << 14 | 1 << 15,
+// };
+
+const VisualData = struct {
+    visual: *c.xcb_visualtype_t,
+    visual_depth: u8,
+
+    const Self = @This();
+
+    pub fn init(screen: *c.xcb_screen_t) !Self {
+        var depth_iter = c.xcb_screen_allowed_depths_iterator(screen);
+        while (depth_iter.rem != 0) {
+            if (depth_iter.data.*.depth == screen.*.root_depth) {
+                var visual_iter = c.xcb_depth_visuals_iterator(depth_iter.data);
+                while (visual_iter.rem != 0) {
+                    if (visual_iter.data.*.visual_id == screen.*.root_visual) {
+                        return Self{
+                            .visual = visual_iter.data,
+                            .visual_depth = depth_iter.data.*.depth,
+                        };
+                    }
+                    c.xcb_visualtype_next(&visual_iter);
+                }
+            }
+            c.xcb_depth_next(&depth_iter);
+        }
+        return error.NoMatchingVisual;
+    }
+};
+
+const S = struct {
+    var main_window_id: c.xcb_window_t = 0;
+    var main_initialized: bool = false; // make in flags if has more  8
+    var root_window: c.xcb_window_t = 0;
+    var root_initialized: bool = false;
+};
+// Purely graphic info //
+const TermWindow = struct {
+    // window state/mode flags */
+    mode: WinMode,
+    // /*tty width and height */
+    tw: u16,
+    th: u16,
+    // /*window width and height */
+    w: u16,
+    h: u16,
+    // /*char height */
+    ch: u16,
+    // /*char width  */
+    cw: u16,
+    // /*cursor style */
+    cursor: u16 = c.CURSORSHAPE,
+};
+
+const Font = struct {
+    face: font.Face,
+    height: u32,
+    width: u32,
+    ascent: u32,
+};
+// Drawing Context
+const DC = struct {
+    col: [260]Color, // len: usize,
+    font: Font,
+    gc: c.xcb_gcontext_t,
+};
+
+pub const Glyph = struct {
+    mode: GLyphMode,
+    u: u32 = 0,
+    fg: u32,
+    bg: u32,
+};
+
+const Selection = struct {
+    xtarget: c.xcb_atom_t,
+    clipcopy: union {
+        primary: ?[]u8,
+        clipboard: ?[]u8,
+    },
+    tclick1: c.timespec,
+    tclick2: c.timespec,
+};
+
+const TCursor = struct {
+    attr: Glyph,
+    x: u32 = 0,
+    y: u32 = 0,
+    state: u8 = 0,
+};
+
+pub const Arg = union {
+    i: i32,
+    ui: u32,
+    f: f64,
+    v: ?*anyopaque,
+    none: void,
+
+    pub const None = &Arg{ .none = {} };
+};
+
+const RenderColor = packed struct(u64) {
+    /// Red color channel. */
+    red: u16,
+    // Green color channel. */
+    green: u16,
+    // Blue color channel. */
+    blue: u16,
+    // Alpha color channel. */
+    alpha: u16,
+};
+
+const Color = packed struct(u96) {
+    pixel: u32,
+    color: RenderColor,
+};
+
+pub inline fn ATTRCMP(a: Glyph, b: Glyph) bool {
+    return a.mode.bits != b.mode.bits or a.fg != b.fg or a.bg != b.bg;
+}
+
+pub inline fn TIMEDIFF(t1: c.struct_timespec, t2: c.struct_timespec) c_long {
+    return (t1.tv_sec - t2.tv_sec) * 1000 + @divTrunc(t1.tv_nsec - t2.tv_nsec, 1_000_000);
+}
 
 inline fn get_colormap(conn: *c.xcb_connection_t) c.xcb_colormap_t {
     return c.xcb_setup_roots_iterator(c.xcb_get_setup(conn)).data.*.default_colormap;
@@ -80,113 +265,25 @@ pub inline fn create_gc(
     }
 }
 
-const VisualData = struct {
-    visual: *c.xcb_visualtype_t,
-    visual_depth: u8,
+pub inline fn set_cardinal_property(
+    conn: *c.xcb_connection_t,
+    prop_name: []const u8,
+    value: u32,
+) void {
+    const prop = get_atom(conn, prop_name);
+    _ = c.xcb_change_property(
+        conn,
+        c.XCB_PROP_MODE_REPLACE,
+        get_main_window(conn),
+        prop,
+        c.XCB_ATOM_CARDINAL,
+        32,
+        1,
+        &value,
+    );
+}
 
-    const Self = @This();
-
-    pub fn init(screen: *c.xcb_screen_t) !Self {
-        var depth_iter = c.xcb_screen_allowed_depths_iterator(screen);
-        while (depth_iter.rem != 0) {
-            if (depth_iter.data.*.depth == screen.*.root_depth) {
-                var visual_iter = c.xcb_depth_visuals_iterator(depth_iter.data);
-                while (visual_iter.rem != 0) {
-                    if (visual_iter.data.*.visual_id == screen.*.root_visual) {
-                        return Self{
-                            .visual = visual_iter.data,
-                            .visual_depth = depth_iter.data.*.depth,
-                        };
-                    }
-                    c.xcb_visualtype_next(&visual_iter);
-                }
-            }
-            c.xcb_depth_next(&depth_iter);
-        }
-        return error.NoMatchingVisual;
-    }
-};
-
-const S = struct {
-    var main_window_id: c.xcb_window_t = 0;
-    var main_initialized: bool = false; // make in flags if has more  8
-    var root_window: c.xcb_window_t = 0;
-    var root_initialized: bool = false;
-
-    // var vt_window: c.xcb_window_t = 0;
-    // var vt_initialized: bool = false;
-};
-
-const win_mode = union(enum(u32)) {
-    MODE_VISIBLE = 1 << 0,
-    MODE_FOCUSED = 1 << 1,
-    MODE_APPKEYPAD = 1 << 2,
-    MODE_MOUSEBTN = 1 << 3,
-    MODE_MOUSEMOTION = 1 << 4,
-    MODE_REVERSE = 1 << 5,
-    MODE_KBDLOCK = 1 << 6,
-    MODE_HIDE = 1 << 7,
-    MODE_APPCURSOR = 1 << 8,
-    MODE_MOUSESGR = 1 << 9,
-    MODE_8BIT = 1 << 10,
-    MODE_BLINK = 1 << 11,
-    MODE_FBLINK = 1 << 12,
-    MODE_FOCUS = 1 << 13,
-    MODE_MOUSEX10 = 1 << 14,
-    MODE_MOUSEMANY = 1 << 15,
-    MODE_BRCKTPASTE = 1 << 16,
-    MODE_NUMLOCK = 1 << 17,
-    MODE_MOUSE = 1 << 3 | 1 << 4 | 1 << 14 | 1 << 15,
-};
-
-// Purely graphic info //
-const TermWindow = struct {
-    // window state/mode flags */
-    mode: win_mode,
-    // tty width and height */
-    tw: u32,
-    th: u32,
-    // window width and height */
-    w: u32,
-    h: u32,
-    // char height */
-    ch: u32,
-    // char width  */
-    cw: u32,
-    // cursor style */
-    cursor: u32,
-};
-
-const Font = struct {
-    face: font.Face,
-    height: u32,
-    width: u32,
-    ascent: u32,
-};
-// Drawing Context
-const DC = struct {
-    col: [260]Color, // len: usize,
-    font: Font,
-    gc: c.xcb_gcontext_t,
-};
-
-const RenderColor = packed struct(u64) {
-    /// Red color channel. */
-    red: u16,
-    // Green color channel. */
-    green: u16,
-    // Blue color channel. */
-    blue: u16,
-    // Alpha color channel. */
-    alpha: u16,
-};
-
-const Color = packed struct(u96) {
-    pixel: u32,
-    color: RenderColor,
-};
-
-//TODO:function for epoll events with getting fd from conn,MAKE ALL XCB CALLS CLEAR,MEMORY LEAKS NOW
+//TODO:function for epoll events with getting fd from conn,MAKE ALL XCB CALLS CLEAR,MEMORY LEAKS NOW,CACHE atoms,change doc about windows
 //
 
 pub inline fn init_colors(
@@ -204,7 +301,7 @@ pub inline fn get_geometry_reply(xc: *c.xcb_connection_t, cookie: c.xcb_get_geom
     };
     defer std.c.free(reply);
     return TermWindow{
-        .mode = .MODE_HIDE,
+        .mode = WinMode.initEmpty(),
         .w = reply.*.width,
         .h = reply.*.height,
         .ch = 0,
@@ -218,8 +315,8 @@ pub inline fn get_geometry_reply(xc: *c.xcb_connection_t, cookie: c.xcb_get_geom
 pub inline fn get_geometry(xc: *c.xcb_connection_t, f: Font) !TermWindow {
     var geo = try get_geometry_reply(xc, c.xcb_get_geometry(xc, get_main_window(xc)));
     // Adjust size to fit character grid
-    geo.w -= geo.w % f.width;
-    geo.h -= geo.h % f.height;
+    geo.w -= geo.w % @as(u16, @intCast(f.width));
+    geo.h -= geo.h % @as(u16, @intCast(f.height));
     return geo;
 }
 
@@ -231,7 +328,7 @@ pub fn resize_window(conn: *c.xcb_connection_t, f: Font) void {
     };
 
     // Configure VT window size
-    const vt_values = [_]u32{ geo.w, geo.h };
+    const vt_values = [_]u16{ geo.w, geo.h };
     _ = c.xcb_configure_window(conn, get_main_window(conn), c.XCB_CONFIG_WINDOW_WIDTH | c.XCB_CONFIG_WINDOW_HEIGHT, &vt_values);
 }
 
@@ -291,17 +388,9 @@ pub fn get_main_window(conn: *c.xcb_connection_t) c.xcb_window_t {
     return S.main_window_id;
 }
 
-// pub fn get_vt_window(conn: *c.xcb_connection_t) c.xcb_window_t {
-//     if (!S.vt_initialized) {
-//         S.vt_window = c.xcb_generate_id(conn);
-//         S.vt_initialized = true;
-//     }
-//     return S.vt_window;
-// }
-
 pub const masks = union(enum(u32)) {
 
-    // main
+    // mainWinMode
     pub const WINDOW_WM: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK;
     pub const CHILD_EVENT_MASK: u32 = c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS | c.XCB_EVENT_MASK_BUTTON_RELEASE | c.XCB_EVENT_MASK_BUTTON_MOTION;
 
@@ -336,9 +425,71 @@ pub inline fn get_wm_del_win(
 }
 
 // pub inline fn open_font(
-//     conn: *c.xcb_connection_t,
+//     conn: *c.xcb_connection_t
 //     font_id: c.xcb_font_t,
 // ) bool {}
+
+pub inline fn set_utf8_prop(
+    conn: *c.xcb_connection_t,
+    prop: c.xcb_atom_t,
+    value: []const u8,
+) void {
+    const utf8 = get_atom(conn, "UTF8_STRING");
+    // const prop = get_atom(conn, prop_name);
+    _ = c.xcb_change_property(
+        conn,
+        c.XCB_PROP_MODE_REPLACE,
+        get_main_window(conn),
+        prop,
+        utf8,
+        8,
+        @intCast(value.len),
+        value.ptr,
+    );
+}
+
+pub inline fn get_clipboard(
+    conn: *c.xcb_connection_t,
+) c.xcb_atom_t {
+    const a = get_atom(conn, "CLIBOARD");
+    return a;
+}
+
+pub inline fn set_property(
+    conn: *c.xcb_connection_t,
+    atom: c.xcb_atom_t,
+    size: u32,
+    value: *anyopaque,
+) void {
+    _ = c.xcb_change_property(
+        conn,
+        c.XCB_PROP_MODE_REPLACE,
+        get_main_window(conn),
+        atom,
+        c.XCB_ATOM_STRING,
+        8,
+        size,
+        value,
+    );
+}
+
+// pub inline fn set_property(
+//     conn: *c.xcb_connection_t,
+//     prop_name: []const u8,
+//     value: []const u8,
+// ) void {
+//     _ = c.xcb_change_property(
+//         conn,
+//         c.XCB_PROP_MODE_REPLACE,
+//         get_main_window(conn),
+//         get_atom(conn, prop_name),
+//         c.XCB_ATOM_STRING,
+//         8,
+//         @intCast(value.len),
+
+//         value.ptr,
+//     );
+// }
 
 pub inline fn create_main_window(
     conn: *c.xcb_connection_t,
@@ -383,7 +534,7 @@ pub inline fn get_cursor(
     return cursor;
 }
 
-pub inline fn set_cursor(
+pub inline fn set_cursor( //free
     conn: *c.xcb_connection_t,
     font_id: c.xcb_font_t,
 ) c.xcb_cursor_t {
@@ -394,8 +545,8 @@ pub inline fn set_cursor(
         cursor_id,
         font_id,
         font_id,
-        c.cursorshape,
-        c.cursorshape + 1,
+        c.CURSORSHAPE,
+        c.CURSORSHAPE + 1,
         0xffff,
         0xffff,
         0xffff,
@@ -517,7 +668,6 @@ pub fn color_alloc_value(
 
 pub inline fn color_alloc_name(
     conn: *c.xcb_connection_t,
-    // visual: *c.xcb_visualtype_t,
     cmap: c.xcb_colormap_t,
     name: [*:0]const u8,
     result: *Color,
@@ -541,7 +691,11 @@ pub inline fn color_alloc_name(
     return false;
 }
 
-pub inline fn get_pixel(conn: *c.xcb_connection_t, cmap: c.xcb_colormap_t, color: []const u8) u32 {
+pub inline fn get_pixel(
+    conn: *c.xcb_connection_t,
+    cmap: c.xcb_colormap_t,
+    color: []const u8,
+) u32 {
     const color_cookie = c.xcb_alloc_named_color(conn, cmap, @intCast(color.len), color.ptr);
 
     const reply = c.xcb_alloc_named_color_reply(conn, color_cookie, null);
@@ -589,9 +743,10 @@ const Atoms = packed struct {
 };
 
 pub const XlibTerminal = struct {
+    //========main struct=========//=
     connection: *c.xcb_connection_t,
+    //============================//=
     screen: *c.xcb_screen_t,
-    // window: c.xcb_window_t,
     pixmap: c.xcb_pixmap_t,
     allocator: Allocator,
     pty: justty.Pty,
@@ -599,19 +754,12 @@ pub const XlibTerminal = struct {
     visual: VisualData,
     cursor: c.xcb_cursor_t,
     cursor_font: c.xcb_font_t,
-    // atoms: Atoms,
     ft: font.FreeType,
     fc: font.Fontconfig,
-    // colormap: c.xcb_colormap_t,
 
     dc: DC,
-    // gc_values: c.xcb_change_gc_value_list_t,
     output: [1024]u8 = undefined, // Buffer to store pty output
     win: TermWindow,
-    // buf: c.xcb_drawable_t,
-    //============================attrs x ===============================//
-    // attrs: c.XSetWindowAttributes,
-    //===================================================================//
     output_len: usize = 0, // Length of stored output
 
     const Self = @This();
@@ -690,8 +838,8 @@ pub const XlibTerminal = struct {
         try face.setCharSize(0, @as(i32, @intFromFloat(pixel_size * 64)), 96, 96);
 
         const metrics = face.handle.*.size.*.metrics;
-        const cw = @as(u32, @intCast((metrics.max_advance + 63) >> 6));
-        const ch = @as(u32, @intCast((metrics.height + 63) >> 6));
+        const cw = @as(u16, @intCast((metrics.max_advance + 63) >> 6));
+        const ch = @as(u16, @intCast((metrics.height + 63) >> 6));
         const ascent = @as(usize, @intCast((metrics.ascender + 63) >> 6));
 
         // errdefer _ = c.XftFontClose(display, _font_);
@@ -704,21 +852,27 @@ pub const XlibTerminal = struct {
         // const cmap = screen.*.default_colormap;
         //load colors
         //adjust fixed window geometry //
-        const border_px = @as(u32, @intCast(c.borderpx)); // u32
-        const cols_u32 = @as(u32, @intCast(c.cols)); // u8
-        const rows_u32 = @as(u32, @intCast(c.rows)); // u8
+        const border_px = @as(u16, @intCast(c.borderpx)); // u16
+        const cols_u16 = @as(u16, @intCast(c.cols)); // u8
+        const rows_u16 = @as(u16, @intCast(c.rows)); // u8
         var win: TermWindow = undefined;
-        win.mode = .MODE_NUMLOCK;
-        win.tw = cols_u32;
-        win.th = rows_u32;
+        win.mode = WinMode.initEmpty();
+        win.tw = cols_u16;
+        win.th = rows_u16;
         win.cw = cw;
         win.ch = ch;
-        win.w = 2 * border_px + cols_u32 * cw;
-        win.h = 2 * border_px + rows_u32 * ch;
+        win.w = @as(u16, 2 * border_px + cols_u16 * cw);
+        win.h = @as(u16, 2 * border_px + rows_u16 * ch);
         // .cursor = c.mouseshape,
         //============drawing_context======================//
         var dc: DC = undefined;
         errdefer _ = c.xcb_free_gc(connection, dc.gc);
+        win.mode.set(@intFromEnum(WinModeFlags.MODE_NUMLOCK));
+        if (comptime util.isDebug) {
+            if (win.mode.isSet(@intFromEnum(WinModeFlags.MODE_NUMLOCK))) {
+                std.log.info("Window is numlock", .{});
+            }
+        }
         // dc.col = try allocator.alloc(c.XftColor, dc.len); //alloc
 
         dc.font = .{
@@ -749,43 +903,12 @@ pub const XlibTerminal = struct {
             }
         }
 
-        // //attrs
-        // var attrs: c.XSetWindowAttributes = undefined;
-        // attrs.background_pixel = dc.col[c.defaultbg].pixel;
-        // attrs.border_pixel = dc.col[c.defaultbg].pixel;
-        // attrs.bit_gravity = c.NorthWestGravity;
-
-        // attrs.event_mask = c.FocusChangeMask | c.KeyPressMask | c.KeyReleaseMask | c.ExposureMask | c.VisibilityChangeMask | c.StructureNotifyMask | c.ButtonMotionMask | c.ButtonPressMask | c.ButtonReleaseMask;
-        // attrs.colormap = cmap;
         const window = get_main_window(connection);
-        // var values_vt = [_]u32{
-        //     dc.col[c.defaultbg].pixel,
-        //     masks.CHILD_EVENT_MASK,
-        //     cursor,
-        // };
-
-        // _ = c.xcb_create_window(
-        //     connection,
-        //     visual_data.visual_depth,
-        //     window,
-        //     root,
-        //     0,
-        //     0,
-        //     @as(u16, @intCast(win.w)),
-        //     @as(u16, @intCast(win.h)),
-
-        //     0,
-        //     c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
-        //     visual,
-        //     mask,
-        //     &values,
-        // );
 
         errdefer _ = c.xcb_destroy_window(
             connection,
             root,
         );
-        //============ pixmap =============================//
         var values_main = [_]u32{
             dc.col[c.defaultbg].pixel,
             c.XCB_EVENT_MASK_EXPOSURE |
@@ -831,8 +954,6 @@ pub const XlibTerminal = struct {
         dc.gc = create_gc(connection, dc.gc, get_main_window(connection), dc.col[c.defaultfg].pixel, dc.col[c.defaultbg].pixel);
         errdefer _ = c.xcb_free_gc(connection, dc.gc);
 
-        win.cursor = @as(u32, @intCast(cursor));
-
         // const vt_window = get_vt_window(connection);
 
         // init_colors(connection, &dc);
@@ -845,8 +966,8 @@ pub const XlibTerminal = struct {
                 .{
                     .x = 0,
                     .y = 0,
-                    .width = @as(u16, @intCast(win.w)),
-                    .height = @as(u16, @intCast(win.h)),
+                    .width = win.w,
+                    .height = win.h,
                 },
             },
         );
@@ -876,7 +997,9 @@ pub const XlibTerminal = struct {
         //     }
         // }
 
-        const atom = get_wm_del_win(connection);
+        const atom_del = get_wm_del_win(connection);
+        // const pid_atom = get_atom(connection, "_NET_WM_PID");
+        // set_property(connection, "_NET_WM_PID", value: []const u8)
         //==================atom ======================//
         //============================================//
         set_windows_name(connection, get_main_window(connection), "justty");
@@ -884,16 +1007,18 @@ pub const XlibTerminal = struct {
 
         errdefer pty.deinit();
         const pid = try posix.fork();
+        // set_cardinal_property(connection, "_NET_WM_PID", @intCast(pid));
         _ = c.xcb_change_property(
             connection,
             c.XCB_PROP_MODE_REPLACE,
             root,
-            atom,
+            atom_del,
             c.XCB_ATOM_ATOM,
             32,
             1,
-            &atom,
+            &atom_del,
         );
+        // set_property(conn: *c.xcb_connection_t, prop_name: []const u8, value: []const u8)
         try pty.exec(pid);
         map_windows(connection, dc.font);
         _ = c.xcb_flush(connection);
@@ -1123,8 +1248,8 @@ pub const XlibTerminal = struct {
     }
 
     inline fn redraw(self: *Self) !void {
-        const width = self.win.w;
-        const height = self.win.h;
+        const width = @as(u32, @intCast(self.win.w));
+        const height = @as(u32, @intCast(self.win.h));
         const buffer = try self.allocator.alloc(u32, width * height);
         if (comptime util.isDebug) {
             if (self.dc.col[c.defaultbg].pixel == 0) {

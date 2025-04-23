@@ -62,6 +62,7 @@ pub const Pty = struct {
 
     master: fd,
     slave: fd,
+    pid: posix.pid_t = 0,
 
     pub fn open(size: winsize) !Self {
         var master_fd: fd = undefined;
@@ -104,7 +105,13 @@ pub const Pty = struct {
         };
     }
 
+    pub fn ttyhangup(self: *Self) void {
+        // Send SIGHUP to shell
+        _ = c.kill(self.master, c.SIGHUP);
+    }
+
     pub fn exec(self: *Self, pid: posix.pid_t) !void {
+        self.pid = pid;
         const shell = getShellPath();
         if (pid != 0) {
             // log.warn("fork failed: {}", .{});
