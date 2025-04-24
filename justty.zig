@@ -26,25 +26,6 @@ const STR_ARG_SIZ = ESC_ARG_SIZ;
 
 //=========================//* utf consts //=======================
 //
-//
-
-const Term = struct {
-    row: u16, // nb row
-    col: u16, // nb col
-    tw: u16, // xpixel
-    th: u16, // ypixel
-
-};
-
-const term_mode = union(enum(u8)) {
-    MODE_WRAP = 1 << 0,
-    MODE_INSERT = 1 << 1,
-    MODE_ALTSCREEN = 1 << 2,
-    MODE_CRLF = 1 << 3,
-    MODE_ECHO = 1 << 4,
-    MODE_PRINT = 1 << 5,
-    MODE_UTF8 = 1 << 6,
-};
 
 pub const Pty = struct {
     const fd = posix.fd_t;
@@ -128,6 +109,7 @@ pub const Pty = struct {
             try posix.dup2(self.slave, posix.STDOUT_FILENO);
             try posix.dup2(self.slave, posix.STDERR_FILENO);
             posix.close(self.slave);
+
             // const e = posix.execvpeZ("/bin/echo", &[_:null]?[*:0]const u8{ "sh", null, null }, std.c.environ);
             const e = std.posix.execvpeZ(shell, &.{ shell, null }, std.c.environ);
             std.debug.print("could not exec shell: {}\n", .{e});

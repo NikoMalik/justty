@@ -12,9 +12,8 @@ const Allocator = std.mem.Allocator;
 //*main_window The main terminal window containing design elements (title bar, frames) that are usually added by the window manager.
 // It is the parent of vt_window.
 //Responsible for interaction with the window manager (e.g. resize, move, focus).
+// (text, cursor) are displayed and user inputs (keys, mouse) are processed
 
-//vt_window Child window main_window.
-//Here the contents of the terminal (text, cursor) are displayed and user inputs (keys, mouse) are processed.
 //
 //root_window
 //└── main_window
@@ -24,9 +23,26 @@ const Key = packed struct(u64) {
     mode: u32,
 };
 
+pub const masks = union(enum(u32)) {
+
+    // mainWinMode
+    pub const WINDOW_WM: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK;
+    pub const CHILD_EVENT_MASK: u32 = c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS | c.XCB_EVENT_MASK_BUTTON_RELEASE | c.XCB_EVENT_MASK_BUTTON_MOTION;
+
+    pub const WINDOW_CURSOR: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_CURSOR;
+};
+
+const elements = enum(u8) {
+    COPY_FROM_PARENT = c.XCB_COPY_FROM_PARENT,
+};
+
 const GLyphMode = std.bit_set.IntegerBitSet(13);
 
-const Glyph_flags = enum(u5) {
+const WinMode = std.bit_set.IntegerBitSet(19);
+
+const TermMode = std.bit_set.IntegerBitSet(7);
+
+const Glyph_flags = enum(u4) {
     ATTR_NULL = 0,
     ATTR_BOLD = 1,
     ATTR_FAINT = 2,
@@ -42,7 +58,15 @@ const Glyph_flags = enum(u5) {
     ATTR_BOLD_FAINT = 12,
 };
 
-const WinMode = std.bit_set.IntegerBitSet(19);
+const TermModeFlags = enum(u3) {
+    MODE_WRAP = 0,
+    MODE_INSERT = 1,
+    MODE_ALTSCREEN = 2,
+    MODE_CRLF = 3,
+    MODE_ECHO = 4,
+    MODE_PRINT = 5,
+    MODE_UTF8 = 6,
+};
 
 const WinModeFlags = enum(u5) {
     MODE_VISIBLE = 0,
@@ -65,28 +89,6 @@ const WinModeFlags = enum(u5) {
     MODE_NUMLOCK = 17,
     MODE_MOUSE = 18,
 };
-
-// const win_mode = union(enum(u32)) {
-//     MODE_VISIBLE = 1 << 0,
-//     MODE_FOCUSED = 1 << 1,
-//     MODE_APPKEYPAD = 1 << 2,
-//     MODE_MOUSEBTN = 1 << 3,
-//     MODE_MOUSEMOTION = 1 << 4,
-//     MODE_REVERSE = 1 << 5,
-//     MODE_KBDLOCK = 1 << 6,
-//     MODE_HIDE = 1 << 7,
-//     MODE_APPCURSOR = 1 << 8,
-//     MODE_MOUSESGR = 1 << 9,
-//     MODE_8BIT = 1 << 10,
-//     MODE_BLINK = 1 << 11,
-//     MODE_FBLINK = 1 << 12,
-//     MODE_FOCUS = 1 << 13,
-//     MODE_MOUSEX10 = 1 << 14,
-//     MODE_MOUSEMANY = 1 << 15,
-//     MODE_BRCKTPASTE = 1 << 16,
-//     MODE_NUMLOCK = 1 << 17,
-//     MODE_MOUSE = 1 << 3 | 1 << 4 | 1 << 14 | 1 << 15,
-// };
 
 const VisualData = struct {
     visual: *c.xcb_visualtype_t,
@@ -121,28 +123,22 @@ const S = struct {
     var root_window: c.xcb_window_t = 0;
     var root_initialized: bool = false;
 };
+
 // Purely graphic info //
 const TermWindow = struct {
-    // window state/mode flags */
     mode: WinMode,
-    // /*tty width and height */
-    tw: u16,
-    th: u16,
-    // /*window width and height */
-    w: u16,
-    h: u16,
-    // /*char height */
-    ch: u16,
-    // /*char width  */
-    cw: u16,
-    // /*cursor style */
+    ///*tty width and height */
+    tty_grid: Grid, // tw и th → tty_size.w and tty_size.h
+    //*window width and height */
+    win_size: Size, // w и h → win_size.width and win_size.height
+    // /*char height and width */
+    char_size: Size, // cw и ch → char_size.w and char_size.h
     cursor: u16 = c.CURSORSHAPE,
 };
 
 const Font = struct {
     face: font.Face,
-    height: u32,
-    width: u32,
+    size: Size,
     ascent: u32,
 };
 // Drawing Context
@@ -152,11 +148,119 @@ const DC = struct {
     gc: c.xcb_gcontext_t,
 };
 
+/// size pixels (windows, symbols, fonts).
+pub const Size = packed struct(u32) {
+    width: u16,
+    height: u16,
+};
+
+/// count
+pub const Grid = packed struct(u32) {
+    cols: u16,
+    rows: u16,
+};
+
+pub const Position = packed struct(u32) {
+    x: u16,
+    y: u16,
+};
+
+pub const Bounds = packed struct(u32) {
+    top: u16,
+    bottom: u16,
+};
+
+/// limitation or indexes (for example, min value or index of line ).
+pub const Constraints = packed struct(u32) {
+    min: u16, // min value (for example lines)
+    index: u16, // index (for example index of line)
+};
+
+//Represents a single “cell” of the screen with the symbol and its attributes:
+// grid based interfaces
 pub const Glyph = struct {
-    mode: GLyphMode,
-    u: u32 = 0,
-    fg: u32,
-    bg: u32,
+    mode: GLyphMode, // flags BOLD,ITALIC and more
+    u: u32 = 0, //unicode  char
+    fg_index: u9 = @as(u9, @intCast(c.defaultfg)), //foreground
+    bg_index: u9 = @as(u9, @intCast(c.defaultbg)), //background
+};
+
+const DirtySet = std.bit_set.ArrayBitSet(u32, c.MAX_ROWS);
+
+const Term = struct {
+    mode: TermMode, // Terminal modes
+    /// Allocator
+    allocator: Allocator,
+    //(e.g., line auto-transfer, alternate screen, UTF-8).
+    dirty: DirtySet, //Bitmask to keep track of “dirty” rows that need to be redrawn.
+    line: [c.MAX_ROWS][]Glyph, // Array of strings with fixed size MAX_ROWS
+    alt: [c.MAX_ROWS][]Glyph, // alt array(for example vim,htop) of strings with fixes size MAX_ROWS
+
+    //For an 80x24 character terminal with a Glyph size of 16 bytes, one screen takes ~30 KB.
+    //Two screens - ~60 KB. can we use union for 60kb? mb not
+    size_grid: Grid, // Grid size (cols, rows)
+    cursor: TCursor, //cursor
+    tabs: [c.MAX_COLS]u8,
+    ocx: u16 = 0, // Previous cursor position X
+    ocy: u16 = 0, // Previous cursor position Y
+    top: u16 = 0, // Upper scroll limit
+    bot: u16 = 0, // Lower scroll limit
+    esc: u16 = 0, // Status of ESC sequences
+    charset: u16 = 0, // Current encoding
+    icharset: u16 = 0, // Encoding index
+    trantbl: [4]u8, // /* charset table translation */
+    cursor_visible: bool, // Cursor visibility
+
+    fn handle_esc_sequence(self: *Term, sequence: []const u8) void {
+        if (std.mem.eql(u8, sequence, "[?1049h")) {
+            self.mode.set(@intFromEnum(TermModeFlags.MODE_ALTSCREEN));
+        } else if (std.mem.eql(u8, sequence, "[?1049l")) {
+            self.mode.unset(@intFromEnum(TermModeFlags.MODE_ALTSCREEN));
+        }
+    }
+
+    fn tlinelen(self: *Term, y: u32) u32 {
+        var i = self.size_grid.cols;
+
+        if (self.line[y][i - 1].mode.isSet(Glyph_flags.ATTR_WRAP))
+            return i;
+        while (i > 0 and self.line[y][i - 1].u == ' ')
+            i -= 1;
+
+        return i;
+    }
+
+    fn parse_esc(self: *Term, data: []const u8) void {
+        for (data) |byte| {
+            switch (self.esc) {
+                0 => {
+                    if (byte == 0x1B) self.esc = 1;
+                },
+                1 => {
+                    if (byte == '[') self.esc = 2 else self.esc = 0;
+                },
+                2 => {
+                    switch (byte) {
+                        'J' => {
+                            if (self.mode.isSet(@intFromEnum(TermModeFlags.MODE_ALTSCREEN))) {
+                                @memset(self.alt, Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg });
+                            } else {
+                                @memset(self.line, Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg });
+                            }
+                            self.dirty.setRangeValue(0, self.size_grid.rows, true);
+                            self.esc = 0;
+                        },
+                        'H' => {
+                            self.cursor.pos = Position{ .x = 0, .y = 0 };
+                            self.esc = 0;
+                        },
+                        else => self.esc = 0,
+                    }
+                },
+                else => self.esc = 0,
+            }
+        }
+    }
 };
 
 const Selection = struct {
@@ -168,11 +272,10 @@ const Selection = struct {
     tclick1: c.timespec,
     tclick2: c.timespec,
 };
-
+//current cursor
 const TCursor = struct {
-    attr: Glyph,
-    x: u32 = 0,
-    y: u32 = 0,
+    attr: Glyph, //current char attrs
+    pos: Position, // pos.x and pos.y for cursor position
     state: u8 = 0,
 };
 
@@ -182,7 +285,7 @@ pub const Arg = union {
     f: f64,
     v: ?*anyopaque,
     none: void,
-
+    //current char attrs
     pub const None = &Arg{ .none = {} };
 };
 
@@ -202,12 +305,17 @@ const Color = packed struct(u96) {
     color: RenderColor,
 };
 
-pub inline fn ATTRCMP(a: Glyph, b: Glyph) bool {
-    return a.mode.bits != b.mode.bits or a.fg != b.fg or a.bg != b.bg;
-}
-
 pub inline fn TIMEDIFF(t1: c.struct_timespec, t2: c.struct_timespec) c_long {
     return (t1.tv_sec - t2.tv_sec) * 1000 + @divTrunc(t1.tv_nsec - t2.tv_nsec, 1_000_000);
+}
+
+pub inline fn LIMIT(
+    comptime T: type,
+    x: T,
+    low: T,
+    hi: T,
+) T {
+    return if (x < low) low else if (x > hi) hi else x;
 }
 
 inline fn get_colormap(conn: *c.xcb_connection_t) c.xcb_colormap_t {
@@ -284,6 +392,7 @@ pub inline fn set_cardinal_property(
 }
 
 //TODO:function for epoll events with getting fd from conn,MAKE ALL XCB CALLS CLEAR,MEMORY LEAKS NOW,CACHE atoms,change doc about windows
+// esc commansd \e[2J to clear the screen, \e[H to move the cursor).
 //
 
 pub inline fn init_colors(
@@ -300,23 +409,19 @@ pub inline fn get_geometry_reply(xc: *c.xcb_connection_t, cookie: c.xcb_get_geom
         return error.CannotGetGeometry;
     };
     defer std.c.free(reply);
+    const height = reply.*.height;
     return TermWindow{
         .mode = WinMode.initEmpty(),
-        .w = reply.*.width,
-        .h = reply.*.height,
-        .ch = 0,
+        .tty_grid = Grid{ .cols = 0, .rows = 0 },
+        .win_size = Size{ .width = reply.*.width, .height = height },
+        .char_size = Size{ .width = 0, .height = 0 },
         .cursor = 0,
-        .cw = 0,
-        .tw = 0,
-        .th = 0,
     };
 }
-
 pub inline fn get_geometry(xc: *c.xcb_connection_t, f: Font) !TermWindow {
     var geo = try get_geometry_reply(xc, c.xcb_get_geometry(xc, get_main_window(xc)));
-    // Adjust size to fit character grid
-    geo.w -= geo.w % @as(u16, @intCast(f.width));
-    geo.h -= geo.h % @as(u16, @intCast(f.height));
+    geo.win_size.width -= geo.win_size.width % f.size.width;
+    geo.win_size.height -= geo.win_size.height % f.size.height;
     return geo;
 }
 
@@ -326,9 +431,7 @@ pub fn resize_window(conn: *c.xcb_connection_t, f: Font) void {
         std.log.err("Failed to get geometry: {}", .{err});
         return;
     };
-
-    // Configure VT window size
-    const vt_values = [_]u16{ geo.w, geo.h };
+    const vt_values = [_]u16{ geo.win_size.width, geo.win_size.height };
     _ = c.xcb_configure_window(conn, get_main_window(conn), c.XCB_CONFIG_WINDOW_WIDTH | c.XCB_CONFIG_WINDOW_HEIGHT, &vt_values);
 }
 
@@ -387,19 +490,6 @@ pub fn get_main_window(conn: *c.xcb_connection_t) c.xcb_window_t {
     }
     return S.main_window_id;
 }
-
-pub const masks = union(enum(u32)) {
-
-    // mainWinMode
-    pub const WINDOW_WM: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK;
-    pub const CHILD_EVENT_MASK: u32 = c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS | c.XCB_EVENT_MASK_BUTTON_RELEASE | c.XCB_EVENT_MASK_BUTTON_MOTION;
-
-    pub const WINDOW_CURSOR: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_CURSOR;
-};
-
-const elements = enum(u8) {
-    COPY_FROM_PARENT = c.XCB_COPY_FROM_PARENT,
-};
 
 pub inline fn get_atom(
     conn: *c.xcb_connection_t,
@@ -498,7 +588,6 @@ pub inline fn create_main_window(
     values: []u32,
     mask: u32,
     visual: VisualData,
-    // visual: VisualData, // Add visual parameter
 ) void {
     const window = get_main_window(conn);
     const cookie = c.xcb_create_window_checked(
@@ -508,13 +597,11 @@ pub inline fn create_main_window(
         root,
         0,
         0,
-        @as(u16, @intCast(win.w)),
-        @as(u16, @intCast(win.h)),
+        @intCast(win.win_size.width),
+        @intCast(win.win_size.height),
         0,
-
         c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
         visual.visual.*.visual_id,
-
         mask,
         values.ptr,
     );
@@ -852,19 +939,29 @@ pub const XlibTerminal = struct {
         // const cmap = screen.*.default_colormap;
         //load colors
         //adjust fixed window geometry //
-        const border_px = @as(u16, @intCast(c.borderpx)); // u16
+        var border_px = @as(u16, @intCast(c.borderpx)); // u16
         const cols_u16 = @as(u16, @intCast(c.cols)); // u8
         const rows_u16 = @as(u16, @intCast(c.rows)); // u8
-        var win: TermWindow = undefined;
-        win.mode = WinMode.initEmpty();
-        win.tw = cols_u16;
-        win.th = rows_u16;
-        win.cw = cw;
-        win.ch = ch;
-        win.w = @as(u16, 2 * border_px + cols_u16 * cw);
-        win.h = @as(u16, 2 * border_px + rows_u16 * ch);
+        if (border_px == 0) {
+            border_px = 1;
+        }
+
+        var win: TermWindow = .{
+            .mode = WinMode.initEmpty(),
+            .tty_grid = Grid{ .cols = cols_u16, .rows = rows_u16 },
+            .win_size = Size{ .width = 2 * border_px + cols_u16 * cw, .height = 2 * border_px + rows_u16 * ch },
+            .char_size = Size{ .width = cw, .height = ch },
+            .cursor = c.CURSORSHAPE,
+        };
+        // win.mode = WinMode.initEmpty();
+        // win.tty_size = .
+        // win.tw = cols_u16;
+        // win.th = rows_u16;
+        // win.cw = cw;
+        // win.ch = ch;
+        // win.w = @as(u16, 2 * border_px + cols_u16 * cw);
+        // win.h = @as(u16, 2 * border_px + rows_u16 * ch);
         // .cursor = c.mouseshape,
-        //============drawing_context======================//
         var dc: DC = undefined;
         errdefer _ = c.xcb_free_gc(connection, dc.gc);
         win.mode.set(@intFromEnum(WinModeFlags.MODE_NUMLOCK));
@@ -876,8 +973,7 @@ pub const XlibTerminal = struct {
         // dc.col = try allocator.alloc(c.XftColor, dc.len); //alloc
 
         dc.font = .{
-            .height = @intCast(ch),
-            .width = @intCast(cw),
+            .size = Size{ .width = cw, .height = ch },
             .ascent = @intCast(ascent),
             .face = face,
         };
@@ -933,13 +1029,14 @@ pub const XlibTerminal = struct {
         );
 
         const pixmap = c.xcb_generate_id(connection);
+
         _ = c.xcb_create_pixmap(
             connection,
             visual_data.visual_depth,
             pixmap,
             window,
-            @as(u16, @intCast(win.w)),
-            @as(u16, @intCast(win.h)),
+            win.win_size.width,
+            win.win_size.height,
         );
         errdefer _ = c.xcb_free_pixmap(connection, pixmap);
         //========================cursor =================//
@@ -953,25 +1050,29 @@ pub const XlibTerminal = struct {
         dc.gc = c.xcb_generate_id(connection);
         dc.gc = create_gc(connection, dc.gc, get_main_window(connection), dc.col[c.defaultfg].pixel, dc.col[c.defaultbg].pixel);
         errdefer _ = c.xcb_free_gc(connection, dc.gc);
-
-        // const vt_window = get_vt_window(connection);
-
-        // init_colors(connection, &dc);
-        _ = c.xcb_poly_fill_rectangle(
-            connection,
-            pixmap,
-            dc.gc,
-            0,
-            &[_]c.xcb_rectangle_t{
-                .{
-                    .x = 0,
-                    .y = 0,
-                    .width = win.w,
-                    .height = win.h,
-                },
+        // _ = c.xcb_poly_fill_rectangle(
+        //     connection,
+        //     pixmap,
+        //     dc.gc,
+        //     0,
+        //     &[_]c.xcb_rectangle_t{
+        //         .{
+        //             .x = 0,
+        //             .y = 0,
+        //             .width = win.w,
+        //             .height = win.h,
+        //         },
+        //     },
+        // );
+        //
+        _ = c.xcb_poly_fill_rectangle(connection, pixmap, dc.gc, 0, &[_]c.xcb_rectangle_t{
+            .{
+                .x = 0,
+                .y = 0,
+                .width = win.win_size.width,
+                .height = win.win_size.height,
             },
-        );
-
+        });
         // ================drawable =======================//
         // const draw = c.XftDrawCreate(display, buf, visual, cmap);
         //
@@ -1003,6 +1104,7 @@ pub const XlibTerminal = struct {
         //==================atom ======================//
         //============================================//
         set_windows_name(connection, get_main_window(connection), "justty");
+        set_icon_name(connection, get_main_window(connection), "justty");
         var pty = try justty.Pty.open(initial_size);
 
         errdefer pty.deinit();
@@ -1210,8 +1312,8 @@ pub const XlibTerminal = struct {
                 const config_event = @as(*c.xcb_configure_notify_event_t, @ptrCast(event));
                 if (config_event.window == get_main_window(self.connection)) {
                     const new_size = justty.winsize{
-                        .ws_row = @intCast(@divTrunc(config_event.height, @as(u16, @intCast(self.dc.font.height)))),
-                        .ws_col = @intCast(@divTrunc(config_event.width, @as(u16, @intCast(self.dc.font.width)))),
+                        .ws_row = @intCast(@divTrunc(config_event.height, @as(u16, @intCast(self.dc.font.size.height)))),
+                        .ws_col = @intCast(@divTrunc(config_event.width, @as(u16, @intCast(self.dc.font.size.width)))),
                         .ws_xpixel = 0,
                         .ws_ypixel = 0,
                     };
@@ -1248,8 +1350,8 @@ pub const XlibTerminal = struct {
     }
 
     inline fn redraw(self: *Self) !void {
-        const width = @as(u32, @intCast(self.win.w));
-        const height = @as(u32, @intCast(self.win.h));
+        const width = @as(u32, @intCast(self.win.win_size.width));
+        const height = @as(u32, @intCast(self.win.win_size.height));
         const buffer = try self.allocator.alloc(u32, width * height);
         if (comptime util.isDebug) {
             if (self.dc.col[c.defaultbg].pixel == 0) {
@@ -1269,8 +1371,10 @@ pub const XlibTerminal = struct {
             var x: i32 = 10;
             for (self.output[start..end]) |char| {
                 const glyph_index = self.dc.font.face.getCharIndex(char) orelse continue;
-                self.dc.font.face.loadGlyph(glyph_index, .{ .render = true }) catch continue;
-                self.dc.font.face.renderGlyph(.normal) catch continue;
+                self.dc.font.face.loadGlyph(glyph_index, .{
+                    .render = true,
+                }) catch continue;
+                self.dc.font.face.renderGlyph(.mono) catch continue;
 
                 const bitmap = self.dc.font.face.handle.*.glyph.*.bitmap;
                 const bitmap_left = self.dc.font.face.handle.*.glyph.*.bitmap_left;
@@ -1294,7 +1398,7 @@ pub const XlibTerminal = struct {
                 }
                 x += @intCast(self.dc.font.face.handle.*.glyph.*.advance.x >> 6);
             }
-            y += @intCast(self.dc.font.height);
+            y += @intCast(self.dc.font.size.height);
             start = end + 1;
             if (y > @as(i32, @intCast(height))) break;
         }
@@ -1302,7 +1406,7 @@ pub const XlibTerminal = struct {
         const cursor_x = 10;
         const cursor_y = 10;
         const cursor_width = 2;
-        const cursor_height = self.dc.font.height;
+        const cursor_height = self.dc.font.size.height;
         for (cursor_y..cursor_y + cursor_height) |cy| {
             for (cursor_x..cursor_x + cursor_width) |cx| {
                 if (cx < width and cy < height) {
@@ -1310,12 +1414,6 @@ pub const XlibTerminal = struct {
                 }
             }
         }
-
-        // const data = if (self.visual.visual_depth == 24) blk: {
-        //     const data_24 = try convert_to_24bit_buffer(self.allocator, buffer, width, height, false);
-        //     defer self.allocator.free(data_24);
-        //     break :blk data_24;
-        // } else @as([*]const u8, @ptrCast(buffer.ptr))[0 .. width * height * 4];
 
         const data = @as([*]const u8, @ptrCast(buffer.ptr))[0 .. width * height * 4];
         const image_cookie = c.xcb_put_image_checked(
@@ -1344,8 +1442,8 @@ pub const XlibTerminal = struct {
             0,
             0,
             0,
-            @as(u16, @intCast(width)),
-            @as(u16, @intCast(height)),
+            self.win.win_size.width,
+            self.win.win_size.height,
         );
 
         _ = c.xcb_flush(self.connection);
