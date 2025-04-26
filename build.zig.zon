@@ -2,7 +2,9 @@
     .name = .justty,
     .version = "0.0.0",
     .fingerprint = 0x616758b44451f9ca,
-    .dependencies = .{},
+    .dependencies = .{
+        .simdutf = .{ .path = "./pkg/simdutf", .lazy = true },
+    },
 
     .paths = .{
         "build.zig",

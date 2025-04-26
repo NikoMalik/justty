@@ -5,6 +5,9 @@ const justty = @import("justty.zig");
 const font = @import("font.zig");
 const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
+const data_structs = @import("datastructs.zig");
+const assert = std.debug.assert;
+const unicode = std.unicode.utf8ValidCodepoint;
 //*root window - its This is the root window of the X11 display, covering the entire screen.
 // It is controlled by the window manager and serves as a parent for all other windows in the application.
 //It is not directly involved in rendering, but provides a coordinate system and context for other windows.
@@ -36,11 +39,13 @@ const elements = enum(u8) {
     COPY_FROM_PARENT = c.XCB_COPY_FROM_PARENT,
 };
 
-const GLyphMode = std.bit_set.IntegerBitSet(13);
+const GLyphMode = data_structs.IntegerBitSet(13, u4);
 
-const WinMode = std.bit_set.IntegerBitSet(19);
+const WinMode = data_structs.IntegerBitSet(19, u5);
 
-const TermMode = std.bit_set.IntegerBitSet(7);
+const TermMode = data_structs.IntegerBitSet(7, u3);
+
+const CursorMode = data_structs.IntegerBitSet(3, u2);
 
 const Glyph_flags = enum(u4) {
     ATTR_NULL = 0,
@@ -52,10 +57,16 @@ const Glyph_flags = enum(u4) {
     ATTR_REVERSE = 6,
     ATTR_INVISIBLE = 7,
     ATTR_STRUCK = 8,
-    ATTR_WRAP = 8,
+    ATTR_WRAP = 9,
     ATTR_WIDE = 10,
     ATTR_WDUMMY = 11,
     ATTR_BOLD_FAINT = 12,
+};
+
+const CursorFlags = enum(u2) {
+    CURSOR_DEFAULT = 0,
+    CURSOR_WRAPNEXT = 1,
+    CURSOR_ORIGIN = 2,
 };
 
 const TermModeFlags = enum(u3) {
@@ -185,7 +196,7 @@ pub const Glyph = struct {
     bg_index: u9 = @as(u9, @intCast(c.defaultbg)), //background
 };
 
-const DirtySet = std.bit_set.ArrayBitSet(u32, c.MAX_ROWS);
+const DirtySet = std.bit_set.ArrayBitSet(u16, c.MAX_ROWS);
 
 const Term = struct {
     mode: TermMode, // Terminal modes
@@ -193,8 +204,8 @@ const Term = struct {
     allocator: Allocator,
     //(e.g., line auto-transfer, alternate screen, UTF-8).
     dirty: DirtySet, //Bitmask to keep track of “dirty” rows that need to be redrawn.
-    line: [c.MAX_ROWS][]Glyph, // Array of strings with fixed size MAX_ROWS
-    alt: [c.MAX_ROWS][]Glyph, // alt array(for example vim,htop) of strings with fixes size MAX_ROWS
+    line: [c.MAX_ROWS][c.MAX_COLS]Glyph, // Array of strings with fixed size MAX_ROWS
+    alt: [c.MAX_ROWS][c.MAX_COLS]Glyph, // alt array(for example vim,htop) of strings with fixes size MAX_ROWS
 
     //For an 80x24 character terminal with a Glyph size of 16 bytes, one screen takes ~30 KB.
     //Two screens - ~60 KB. can we use union for 60kb? mb not
@@ -211,18 +222,155 @@ const Term = struct {
     trantbl: [4]u8, // /* charset table translation */
     cursor_visible: bool, // Cursor visibility
 
-    fn handle_esc_sequence(self: *Term, sequence: []const u8) void {
+    inline fn handle_esc_sequence(self: *Term, sequence: []const u8) void {
         if (std.mem.eql(u8, sequence, "[?1049h")) {
-            self.mode.set(@intFromEnum(TermModeFlags.MODE_ALTSCREEN));
+            self.mode.set((TermModeFlags.MODE_ALTSCREEN));
         } else if (std.mem.eql(u8, sequence, "[?1049l")) {
-            self.mode.unset(@intFromEnum(TermModeFlags.MODE_ALTSCREEN));
+            self.mode.unset((TermModeFlags.MODE_ALTSCREEN));
         }
+    }
+    //FIXME:unused
+    inline fn reallocScreen(self: *Term, screen: []Glyph, new_cols: u16, new_rows: u16) !void {
+        for (screen[0..new_rows]) |*row| {
+            const old_len = row.len;
+            row.* = try self.allocator.realloc(row.*, new_cols);
+            if (new_cols > old_len) {
+                @memset(row.*[old_len..new_cols], Glyph{
+                    .u = ' ',
+                    .fg_index = c.defaultfg,
+                    .bg_index = c.defaultbg,
+                    .mode = GLyphMode.initEmpty(),
+                });
+            }
+        }
+    }
+
+    fn resize(self: *Term, col: u16, rows: u16) !void {
+        if (comptime util.isDebug) {
+            assert(col > 1 and rows > 1);
+        }
+
+        const new_cols = @min(col, c.MAX_COLS);
+        const new_rows = @min(rows, c.MAX_ROWS);
+
+        if (self.size_grid.cols == new_cols and self.size_grid.rows == new_rows) return;
+
+        self.size_grid.cols = new_cols;
+        self.size_grid.rows = new_rows;
+
+        self.cursor.pos.x = @min(self.cursor.pos.x, new_cols - 1);
+        self.cursor.pos.y = @min(self.cursor.pos.y, new_rows - 1);
+
+        self.dirty.setRangeValue(0, new_rows, true);
+    }
+
+    // //old
+    // fn resize(self: *Term, col: u16, rows: u16) !void { // TODO:pool for resizes
+    //     if (comptime util.isDebug) {
+    //         assert(col > 1 and rows > 1);
+    //     }
+
+    //     if (self.size_grid.cols == col and self.size_grid.rows == rows) return;
+
+    //     const new_cols = @min(col, c.MAX_COLS);
+    //     const new_rows = @min(rows, c.MAX_ROWS);
+
+    //     const active_screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+
+    //     const cursor_y = self.cursor.pos.y;
+    //     const shift = if (cursor_y >= new_rows) cursor_y - (new_rows - 1) else 0;
+
+    //     if (shift > 0) {
+    //         for (active_screen[0..shift]) |*row| {
+    //             if (row.len > 0) {
+    //                 self.allocator.free(row.*);
+    //                 row.* = &[_]Glyph{};
+    //             }
+    //         }
+    //         util.move([]Glyph, active_screen[0 .. self.size_grid.rows - shift], active_screen[shift..self.size_grid.rows]);
+    //         // clean lines which remained
+    //         for (active_screen[self.size_grid.rows - shift .. self.size_grid.rows]) |*row| {
+    //             row.* = &[_]Glyph{};
+    //         }
+    //     }
+
+    //     try self.reallocScreen(active_screen, new_cols, new_rows);
+
+    //     // init new lines
+    //     if (new_rows > self.size_grid.rows) {
+    //         for (active_screen[self.size_grid.rows..new_rows]) |*row| {
+    //             if (row.len == 0) {
+    //                 row.* = try self.allocator.alloc(Glyph, new_cols);
+    //                 @memset(row.*, Glyph{
+    //                     .u = ' ',
+    //                     .fg_index = c.defaultfg,
+    //                     .bg_index = c.defaultbg,
+    //                     .mode = GLyphMode.initEmpty(),
+    //                 });
+    //             }
+    //         }
+    //     }
+
+    //     // free
+    //     if (new_rows < self.size_grid.rows) {
+    //         for (active_screen[new_rows..self.size_grid.rows]) |*row| {
+    //             if (row.len > 0) {
+    //                 self.allocator.free(row.*);
+    //                 row.* = &[_]Glyph{};
+    //             }
+    //         }
+    //     }
+
+    //     // update tabulation (only for new cols)
+    //     if (new_cols > self.size_grid.cols) {
+    //         for (self.tabs[self.size_grid.cols..new_cols], self.size_grid.cols..) |*tab, i| {
+    //             tab.* = if (i % 8 == 0) 1 else 0;
+    //         }
+    //     }
+
+    //     // update sizes
+    //     self.size_grid.cols = new_cols;
+    //     self.size_grid.rows = new_rows;
+
+    //     // correct cursor position
+    //     self.cursor.pos.x = @min(self.cursor.pos.x, new_cols - 1);
+    //     self.cursor.pos.y = @min(self.cursor.pos.y, new_rows - 1);
+
+    //     // Пометка всех строк как "грязных"
+    //     self.dirty.setRangeValue(0, new_rows, true);
+    // }
+
+    fn tsetdirtattr(self: *Term, attr: Glyph_flags) void {
+        var i: u32 = 0;
+        while (i < self.size_grid.rows) : (i += 1) {
+            var j: u32 = 0;
+            while (j < self.size_grid.cols) : (j += 1) {
+                if (self.line[i][j].mode.isSet(attr)) {
+                    self.set_dirt(i, i);
+                    break;
+                }
+            }
+        }
+    }
+
+    //for example from 5 to 10 lines are dirty
+    fn set_dirt(self: *Term, top: u16, bot: u16) void {
+
+        // check valid
+        if (top > bot or bot >= self.size_grid.rows) {
+            return;
+        }
+
+        // set dirty from top to bot
+        const start = top;
+        const end = @min(bot, self.size_grid.rows - 1); // set limit to bot
+        self.dirty.setRangeValue(start, end + 1, true); // bot + 1, because end excluded
     }
 
     fn tlinelen(self: *Term, y: u32) u32 {
         var i = self.size_grid.cols;
 
-        if (self.line[y][i - 1].mode.isSet(Glyph_flags.ATTR_WRAP))
+        if (self.line[y][i - 1].mode.isSet((Glyph_flags.ATTR_WRAP)))
             return i;
         while (i > 0 and self.line[y][i - 1].u == ' ')
             i -= 1;
@@ -242,10 +390,11 @@ const Term = struct {
                 2 => {
                     switch (byte) {
                         'J' => {
-                            if (self.mode.isSet(@intFromEnum(TermModeFlags.MODE_ALTSCREEN))) {
-                                @memset(self.alt, Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg });
-                            } else {
-                                @memset(self.line, Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg });
+                            const screen = if (self.mode.isSet((TermModeFlags.MODE_ALTSCREEN))) &self.alt else &self.line;
+                            for (screen[0..self.size_grid.rows]) |*row| {
+                                for (row[0..self.size_grid.cols]) |*glyph| {
+                                    glyph.* = Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() };
+                                }
                             }
                             self.dirty.setRangeValue(0, self.size_grid.rows, true);
                             self.esc = 0;
@@ -272,11 +421,12 @@ const Selection = struct {
     tclick1: c.timespec,
     tclick2: c.timespec,
 };
+
 //current cursor
 const TCursor = struct {
     attr: Glyph, //current char attrs
     pos: Position, // pos.x and pos.y for cursor position
-    state: u8 = 0,
+    state: CursorMode,
 };
 
 pub const Arg = union {
@@ -307,15 +457,6 @@ const Color = packed struct(u96) {
 
 pub inline fn TIMEDIFF(t1: c.struct_timespec, t2: c.struct_timespec) c_long {
     return (t1.tv_sec - t2.tv_sec) * 1000 + @divTrunc(t1.tv_nsec - t2.tv_nsec, 1_000_000);
-}
-
-pub inline fn LIMIT(
-    comptime T: type,
-    x: T,
-    low: T,
-    hi: T,
-) T {
-    return if (x < low) low else if (x > hi) hi else x;
 }
 
 inline fn get_colormap(conn: *c.xcb_connection_t) c.xcb_colormap_t {
@@ -393,7 +534,7 @@ pub inline fn set_cardinal_property(
 
 //TODO:function for epoll events with getting fd from conn,MAKE ALL XCB CALLS CLEAR,MEMORY LEAKS NOW,CACHE atoms,change doc about windows
 // esc commansd \e[2J to clear the screen, \e[H to move the cursor).
-//
+// ring buffer and event loop for pty read
 
 pub inline fn init_colors(
     conn: *c.xcb_connection_t,
@@ -753,12 +894,7 @@ pub fn color_alloc_value(
     return true;
 }
 
-pub inline fn color_alloc_name(
-    conn: *c.xcb_connection_t,
-    cmap: c.xcb_colormap_t,
-    name: [*:0]const u8,
-    result: *Color,
-) bool {
+pub inline fn color_alloc_name(conn: *c.xcb_connection_t, cmap: c.xcb_colormap_t, name: [*:0]const u8, result: *Color) bool {
     const cookie = c.xcb_alloc_named_color(
         conn,
         cmap,

@@ -14,6 +14,18 @@ inline fn requireZig(comptime required_zig: []const u8) void {
     }
 }
 
+fn addDependencies(artifact: *std.Build.Step.Compile) void {
+    artifact.addIncludePath(.{ .path = "./include/" });
+    artifact.addIncludePath(.{ .path = "./config/" });
+    artifact.linkSystemLibrary("freetype2");
+    artifact.linkSystemLibrary("fontconfig");
+    artifact.linkSystemLibrary("xcb");
+    artifact.linkSystemLibrary("xinerama");
+    artifact.linkSystemLibrary("Xft");
+    artifact.linkSystemLibrary("xcb-cursor");
+    artifact.linkLibCpp();
+}
+
 comptime {
     requireZig("0.14.0");
 }
@@ -35,7 +47,6 @@ pub fn build(b: *std.Build) void {
     //
     //
     // ==============================================================//
-
     // const lib_mod = b.addModule("justty", .{
     //     .root_source_file = b.path("root.zig"),
     //     .target = target,
@@ -53,6 +64,19 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .optimize = optimize,
     });
+    exe.linkLibCpp();
+    if (b.systemIntegrationOption("simdutf", .{})) {
+        exe.linkSystemLibrary2("simdutf", .{});
+    } else {
+        if (b.lazyDependency("simdutf", .{
+            .target = target,
+            .optimize = optimize,
+        })) |simdutf_dep| {
+            exe.linkLibrary(simdutf_dep.artifact("simdutf"));
+            exe.addIncludePath(simdutf_dep.path("vendor"));
+        }
+    }
+
     exe.addIncludePath(b.path("./include/"));
     exe.addIncludePath(b.path("./config/"));
     exe.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });

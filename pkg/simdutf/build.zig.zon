@@ -1,0 +1,8 @@
+.{
+    .name = .simdutf,
+    .version = "0.0.0",
+    .fingerprint = 0x7494ad6e7f8eb77,
+
+    .paths = .{""},
+    .dependencies = .{},
+}
