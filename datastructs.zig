@@ -5,9 +5,16 @@ const assert = std.debug.assert;
 
 pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make way to put enum here
     comptime {
-        const max_index = (@as(u64, 1) << @bitSizeOf(IndexT)) - 1;
-        if (size > max_index) {
-            @compileError("IndexT is too small to represent all indices for size=" ++ std.fmt.comptimePrint("{}", .{size}));
+        if (@typeInfo(IndexT) == .@"enum") {
+            const max_index = (@as(u64, 1) << @bitSizeOf(IndexT)) - 1; //idk how to do it right :)
+            if (size > max_index) {
+                @compileError("IndexT is too small to represent all indices for size=" ++ std.fmt.comptimePrint("{}", .{size}));
+            }
+        } else {
+            const max_index = (@as(u64, 1) << @bitSizeOf(IndexT)) - 1;
+            if (size > max_index) {
+                @compileError("IndexT is too small to represent all indices for size=" ++ std.fmt.comptimePrint("{}", .{size}));
+            }
         }
     }
 
@@ -41,12 +48,13 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
             _ = self;
             return bit_length;
         }
+        // const indX = if (@typeInfo(IndexT) == .@"enum") @intFromEnum(IndexT) orelse @as(usize, @intCast(IndexT));
 
         /// Returns true if the bit at the specified index
         /// is present in the set, false otherwise.
         pub fn isSet(self: Self, index: IndexT) bool {
             if (comptime util.isDebug) {
-                assert(@as(usize, @intCast(index)) < bit_length);
+                assert(@as(usize, @intFromEnum(index)) < bit_length);
             }
             return (self.mask & maskBit(index)) != 0;
         }
@@ -60,7 +68,7 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
         /// set to match the passed boolean.
         pub fn setValue(self: *Self, index: IndexT, value: bool) void {
             if (comptime util.isDebug) {
-                assert(@as(usize, @intCast(index)) < bit_length);
+                assert(@as(usize, @intFromEnum(index)) < bit_length);
             }
 
             if (MaskInt == u0) return;
@@ -72,7 +80,7 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
         /// Adds a specific bit to the bit set
         pub fn set(self: *Self, index: IndexT) void {
             if (comptime util.isDebug) {
-                assert(@as(usize, @intCast(index)) < bit_length);
+                assert(@as(usize, @intFromEnum(index)) < bit_length);
             }
 
             self.mask |= maskBit(index);
@@ -81,23 +89,23 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
         /// match the passed boolean.
         pub fn setRangeValue(self: *Self, start: IndexT, end: IndexT, value: bool) void {
             if (comptime util.isDebug) {
-                assert(@as(usize, @intCast(end)) <= bit_length);
-                assert(@as(usize, @intCast(start)) <= @as(usize, @intCast(end)));
+                assert(@as(usize, @intFromEnum(end)) <= bit_length);
+                assert(@as(usize, @intFromEnum(start)) <= @as(usize, @intFromEnum(end)));
             }
             if (start == end) return;
             if (MaskInt == u0) return;
 
-            const start_bit = @as(ShiftInt, @intCast(start));
+            const start_bit = @as(ShiftInt, @intFromEnum(start));
             var mask = std.math.boolMask(MaskInt, true) << start_bit;
-            if (@as(usize, @intCast(end)) != bit_length) {
-                const end_bit = @as(ShiftInt, @intCast(end));
+            if (@as(usize, @intFromEnum(end)) != bit_length) {
+                const end_bit = @as(ShiftInt, @intFromEnum(end));
                 mask &= std.math.boolMask(MaskInt, true) >> @as(ShiftInt, @truncate(@as(usize, @bitSizeOf(MaskInt)) - @as(usize, end_bit)));
             }
             self.mask &= ~mask;
 
             mask = std.math.boolMask(MaskInt, value) << start_bit;
-            if (@as(usize, @intCast(end)) != bit_length) {
-                const end_bit = @as(ShiftInt, @intCast(end));
+            if (@as(usize, @intFromEnum(end)) != bit_length) {
+                const end_bit = @as(ShiftInt, @intFromEnum(end));
                 mask &= std.math.boolMask(MaskInt, value) >> @as(ShiftInt, @truncate(@as(usize, @bitSizeOf(MaskInt)) - @as(usize, end_bit)));
             }
             self.mask |= mask;
@@ -106,7 +114,7 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
         /// Removes a specific bit from the bit set
         pub fn unset(self: *Self, index: IndexT) void {
             if (comptime util.isDebug) {
-                assert(@as(usize, @intCast(index)) < bit_length);
+                assert(@as(usize, @intFromEnum(index)) < bit_length);
             }
             if (MaskInt == u0) return;
             self.mask &= ~maskBit(index);
@@ -115,7 +123,7 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
         /// Flips a specific bit in the bit set
         pub fn toggle(self: *Self, index: IndexT) void {
             if (comptime util.isDebug) {
-                assert(@as(usize, @intCast(index)) < bit_length);
+                assert(@as(usize, @intFromEnum(index)) < bit_length);
             }
             self.mask ^= maskBit(index);
         }
@@ -149,16 +157,15 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
         pub fn findFirstSet(self: Self) ?IndexT {
             const mask = self.mask;
             if (mask == 0) return null;
-            return @intCast(@ctz(mask));
+            return @enumFromInt(@ctz(mask));
         }
 
-        /// Находит и сбрасывает первый установленный бит
         pub fn toggleFirstSet(self: *Self) ?IndexT {
             const mask = self.mask;
             if (mask == 0) return null;
             const index = @ctz(mask);
             self.mask = mask & (mask - 1);
-            return @intCast(index);
+            return @enumFromInt(index);
         }
 
         /// Returns true iff every corresponding bit in both
@@ -259,7 +266,7 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
 
         inline fn maskBit(index: IndexT) MaskInt {
             if (MaskInt == u0) return 0;
-            return @as(MaskInt, 1) << @as(ShiftInt, @intCast(index));
+            return @as(MaskInt, 1) << @as(ShiftInt, @intFromEnum(index));
         }
     };
 }

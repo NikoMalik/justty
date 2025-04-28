@@ -14,16 +14,62 @@ inline fn requireZig(comptime required_zig: []const u8) void {
     }
 }
 
-fn addDependencies(artifact: *std.Build.Step.Compile) void {
-    artifact.addIncludePath(.{ .path = "./include/" });
-    artifact.addIncludePath(.{ .path = "./config/" });
+fn addDep(
+    artifact: *std.Build.Step.Compile,
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    artifact.addIncludePath(b.path("./include"));
+    artifact.addIncludePath(b.path("./config/"));
+    artifact.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+
     artifact.linkSystemLibrary("freetype2");
     artifact.linkSystemLibrary("fontconfig");
     artifact.linkSystemLibrary("xcb");
     artifact.linkSystemLibrary("xinerama");
-    artifact.linkSystemLibrary("Xft");
     artifact.linkSystemLibrary("xcb-cursor");
     artifact.linkLibCpp();
+    artifact.linkLibC();
+    artifact.addCSourceFiles(.{
+        .files = &.{
+            "justty_simdutf.cpp",
+        },
+        .flags = &.{
+            "-O3",
+            "-march=native",
+            "-flto",
+            "-fno-exceptions",
+            "-DNDEBUG",
+            "-std=c++17",
+            "-ffunction-sections",
+            "-fdata-sections",
+        },
+    });
+
+    if (b.systemIntegrationOption("simdutf", .{})) {
+        artifact.linkSystemLibrary2("simdutf", .{});
+    } else {
+        if (b.lazyDependency("simdutf", .{
+            .target = target,
+            .optimize = optimize,
+        })) |simdutf_dep| {
+            artifact.linkLibrary(simdutf_dep.artifact("simdutf"));
+            artifact.addIncludePath(simdutf_dep.path("vendor"));
+        }
+    }
+
+    if (b.systemIntegrationOption("highway", .{})) {
+        artifact.linkSystemLibrary2("highway", .{});
+    } else {
+        if (b.lazyDependency("highway", .{
+            .target = target,
+            .optimize = optimize,
+        })) |highway_dep| {
+            artifact.linkLibrary(highway_dep.artifact("highway"));
+            artifact.addIncludePath(highway_dep.path("hwy"));
+        }
+    }
 }
 
 comptime {
@@ -65,6 +111,34 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.linkLibCpp();
+    exe.addCSourceFiles(.{
+        .files = &.{
+            "justty_simdutf.cpp",
+        },
+        .flags = &.{
+            "-O3",
+            "-march=native",
+            "-flto",
+            "-fno-exceptions",
+            "-DNDEBUG",
+            "-std=c++17",
+            "-ffunction-sections",
+            "-fdata-sections",
+        },
+    });
+
+    if (b.systemIntegrationOption("highway", .{})) {
+        exe.linkSystemLibrary2("highway", .{});
+    } else {
+        if (b.lazyDependency("highway", .{
+            .target = target,
+            .optimize = optimize,
+        })) |highway_dep| {
+            exe.linkLibrary(highway_dep.artifact("highway"));
+            exe.addIncludePath(highway_dep.path("hwy"));
+        }
+    }
+
     if (b.systemIntegrationOption("simdutf", .{})) {
         exe.linkSystemLibrary2("simdutf", .{});
     } else {
@@ -88,8 +162,8 @@ pub fn build(b: *std.Build) void {
     // exe.linkSystemLibrary2("freetype2", .{});
     exe.linkSystemLibrary("xcb-cursor");
 
-    exe.linkSystemLibrary("freetype");
-    exe.linkSystemLibrary("Xft");
+    // exe.linkSystemLibrary("freetype");
+    // exe.linkSystemLibrary("Xft");
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
 
@@ -103,18 +177,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    addDep(unit_tests, b, target, optimize);
 
-    unit_tests.addIncludePath(b.path("./include/"));
-    unit_tests.linkSystemLibrary("xcb-cursor");
+    // unit_tests.addIncludePath(b.path("./include/"));
+    // unit_tests.linkSystemLibrary("xcb-cursor");
 
-    unit_tests.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-    unit_tests.linkSystemLibrary("freetype2");
-    unit_tests.linkSystemLibrary("fontconfig");
-    unit_tests.linkSystemLibrary("X11");
-    unit_tests.linkSystemLibrary("xinerama");
-    unit_tests.linkSystemLibrary("freetype");
-    unit_tests.linkSystemLibrary("Xft");
-    unit_tests.linkSystemLibrary("xcb");
+    // unit_tests.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+    // unit_tests.linkSystemLibrary("freetype2");
+    // unit_tests.linkSystemLibrary("fontconfig");
+    // unit_tests.linkSystemLibrary("X11");
+    // unit_tests.linkSystemLibrary("xinerama");
+    // unit_tests.linkSystemLibrary("freetype");
+    // unit_tests.linkSystemLibrary("Xft");
+    // unit_tests.linkSystemLibrary("xcb");
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);

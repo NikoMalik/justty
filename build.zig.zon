@@ -4,6 +4,7 @@
     .fingerprint = 0x616758b44451f9ca,
     .dependencies = .{
         .simdutf = .{ .path = "./pkg/simdutf", .lazy = true },
+        .highway = .{ .path = "./pkg/highway", .lazy = true },
     },
 
     .paths = .{

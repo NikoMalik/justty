@@ -1,6 +1,7 @@
 fast:
 	@zig build -Doptimize=ReleaseFast
-
+test:
+	@zig build test
 
 debug:
 	@zig build -Doptimize=Debug

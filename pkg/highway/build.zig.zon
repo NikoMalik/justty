@@ -1,0 +1,13 @@
+.{
+    .name = .highway,
+    .version = "0.0.0",
+    .fingerprint = 0xdbcf1a743ef18115,
+
+    .paths = .{""},
+    .dependencies = .{
+        .highway = .{
+            .url = "git+https://github.com/google/highway#400fbf20f2e40b984be129b88f83d4748cfc26a0",
+            .hash = "N-V-__8AABwyhQCX-DiJMYwXh1j-Fc-J3mqVIqCcyYyE2QUm",
+        },
+    },
+}
