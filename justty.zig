@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const log = std.log;
 const xlib = @import("x.zig");
 const util = @import("util.zig");
+const print = std.debug.print;
 
 test {
     std.testing.refAllDecls(@This());
@@ -161,6 +162,42 @@ pub fn main() !void {
         std.debug.print("hello ", .{});
         std.debug.print("font : {s}\n", .{c.font});
 
+        //bench TODO:make another folder with benches
+
+        const s1 = "hello world";
+        const s2 = "hello world";
+        const s3 = "hello worlD";
+
+        // Medium buffer
+        const med_size = 10_000;
+        const med1 = try createTestBuffer(allocator, med_size, 'A');
+        defer allocator.free(med1);
+        const med2 = try createTestBuffer(allocator, med_size, 'A');
+        defer allocator.free(med2);
+        const med3 = try createTestBuffer(allocator, med_size, 'B');
+        defer allocator.free(med3);
+
+        // Large buffer
+        const large_size = 1_000_000;
+        const large1 = try createTestBuffer(allocator, large_size, 'X');
+        defer allocator.free(large1);
+        const large2 = try createTestBuffer(allocator, large_size, 'X');
+        defer allocator.free(large2);
+        const large3 = try createTestBuffer(allocator, large_size, 'Y');
+        defer allocator.free(large3);
+
+        print("\n=== Small strings (12 bytes) ===\n", .{});
+        try runBenchmark("Identical", s1, s2);
+        try runBenchmark("Different last char", s1, s3);
+
+        print("\n=== Medium buffers (10,000 bytes) ===\n", .{});
+        try runBenchmark("Identical", med1, med2);
+        try runBenchmark("Different middle", med1, med3);
+
+        print("\n=== Large buffers (1,000,000 bytes) ===\n", .{});
+        try runBenchmark("Identical", large1, large2);
+        try runBenchmark("Completely different", large1, large3);
+
         var term = try xlib.XlibTerminal.init(allocator);
         defer term.deinit();
         try term.run();
@@ -173,4 +210,70 @@ pub fn main() !void {
         defer term.deinit();
         try term.run();
     }
+}
+
+fn createTestBuffer(allocator: std.mem.Allocator, size: usize, fill: u8) ![]u8 {
+    const buf = try allocator.alloc(u8, size);
+    @memset(buf, fill);
+    return buf;
+}
+
+fn wrap_eql(a: []const u8, b: []const u8) bool {
+    return util.eql(u8, a, b);
+}
+
+fn wrap_default(a: []const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a, b);
+}
+
+fn wrap_compare(a: []const u8, b: []const u8) bool {
+    return util.compare(a, b);
+}
+
+fn runBenchmark(comptime label: []const u8, a: []const u8, b: []const u8) !void {
+    const iterations = 100_000;
+
+    const eql_time = try measure(iterations, wrap_eql, a, b);
+    const std_time = try measure(iterations, wrap_default, a, b);
+
+    const compare_time = try measure(iterations, wrap_compare, a, b);
+
+    print(
+        \\{s}:
+        \\  eql:     {d:>5} ns/op ({d:>5.1} MB/s)
+        \\  std:     {d:>5} ns/op ({d:>5.1} MB/s)
+        \\  compare: {d:>5} ns/op ({d:>5.1} MB/s)
+        \\
+    , .{
+        label,
+        eql_time,
+        throughput(a.len, eql_time),
+        std_time,
+        throughput(a.len, std_time),
+        compare_time,
+        throughput(a.len, compare_time),
+    });
+}
+
+fn throughput(bytes: usize, ns_per_op: u64) f64 {
+    const bytes_per_sec = @as(f64, 1e9 / @as(f64, @floatFromInt(ns_per_op))) * @as(f64, @floatFromInt(bytes));
+    return bytes_per_sec / (1024 * 1024);
+}
+
+fn measure(
+    iterations: usize,
+    comptime func: fn ([]const u8, []const u8) bool,
+    a: []const u8,
+    b: []const u8,
+) !u64 {
+    const start = std.time.nanoTimestamp();
+
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        // Prevent compiler optimization
+        std.mem.doNotOptimizeAway(func(a, b));
+    }
+
+    const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start));
+    return elapsed / iterations;
 }

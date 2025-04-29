@@ -31,11 +31,27 @@ fn addDep(
     artifact.linkSystemLibrary("xcb-cursor");
     artifact.linkLibCpp();
     artifact.linkLibC();
+    const HWY_AVX3_SPR: c_int = 1 << 4;
+    const HWY_AVX3_ZEN4: c_int = 1 << 6;
+    const HWY_AVX3_DL: c_int = 1 << 7;
+    const HWY_AVX3: c_int = 1 << 8;
+
+    const HWY_DISABLED_TARGETS: c_int = HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
     artifact.addCSourceFiles(.{
         .files = &.{
             "justty_simdutf.cpp",
         },
-        .flags = &.{
+        .flags = if (artifact.rootModuleTarget().cpu.arch == .x86_64) &.{
+            b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
+            "-O3",
+            "-march=native",
+            "-flto",
+            "-fno-exceptions",
+            "-DNDEBUG",
+            "-std=c++17",
+            "-ffunction-sections",
+            "-fdata-sections",
+        } else &.{
             "-O3",
             "-march=native",
             "-flto",
@@ -111,11 +127,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.linkLibCpp();
+    const HWY_AVX3_SPR: c_int = 1 << 4;
+    const HWY_AVX3_ZEN4: c_int = 1 << 6;
+    const HWY_AVX3_DL: c_int = 1 << 7;
+    const HWY_AVX3: c_int = 1 << 8;
+
+    const HWY_DISABLED_TARGETS: c_int = HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
+
     exe.addCSourceFiles(.{
         .files = &.{
             "justty_simdutf.cpp",
         },
-        .flags = &.{
+        .flags = if (exe.rootModuleTarget().cpu.arch == .x86_64) &.{
+            b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
+            "-O3",
+            "-march=native",
+            "-flto",
+            "-fno-exceptions",
+            "-DNDEBUG",
+            "-std=c++17",
+            "-ffunction-sections",
+            "-fdata-sections",
+        } else &.{
             "-O3",
             "-march=native",
             "-flto",
