@@ -186,6 +186,34 @@ pub inline fn copy(comptime T: type, dest: []T, source: []const T) void {
     _ = memcpy(dest.ptr, source.ptr, source.len * @sizeOf(T));
 }
 
+/// Scans for:
+/// - " "
+/// - Non-ASCII characters (which implicitly include `\n`, `\r`, '\t')
+pub fn indexOfSpaceOrNewlineOrNonASCII(haystack: []const u8) ?usize {
+    if (haystack.len == 0) {
+        return null;
+    }
+
+    const result = simd_index_of_space_or_newline_or_non_ascii(
+        haystack.ptr,
+        haystack.len,
+    );
+
+    return if (result == haystack.len) null else result;
+}
+
+/// Checks if the string contains any newlines, non-ASCII characters, or quotes
+pub fn containsNewlineOrNonASCIIOrQuote(text: []const u8) bool {
+    if (text.len == 0) {
+        return false;
+    }
+
+    return simd_contains_newline_or_non_ascii_or_quote(
+        text.ptr,
+        text.len,
+    );
+}
+
 fn getVectorWidth() comptime_int {
     const target = builtin.target;
     const cpu = builtin.cpu;
@@ -277,16 +305,6 @@ pub fn eql(comptime T: type, a: []const T, b: []const T) bool {
     return std.mem.eql(T, a[index..], b[index..]);
 }
 
-// test "compare" {
-//     try std.testing.expect(compare("abcd", "abcd"));
-
-//     try std.testing.expect(compare("abc", "abc"));
-//     try std.testing.expect(!compare("abc", "abcd"));
-
-//     try std.testing.expect(compare("abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvc", "abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvc"));
-//     try std.testing.expect(!compare("abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvc", "abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvca"));
-// }
-
 test "eql-2" {
     try std.testing.expect(eql(u8, "abcd", "abcd"));
 
@@ -296,27 +314,6 @@ test "eql-2" {
     try std.testing.expect(eql(u8, "abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvc", "abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvc"));
     try std.testing.expect(!eql(u8, "abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvc", "abcdfty78uhgfdxsedrtyghvfxdzesr80hBRUHugyt799t8oguvhckdi9rtgvca"));
 }
-
-// test "eql" {
-//     const testing = std.testing;
-
-//     try testing.expect(eql(u8, "abcd", "abcd"));
-//     try testing.expect(!eql(u8, "abcdef", "abZdef"));
-//     try testing.expect(!eql(u8, "abcdefg", "abcdef"));
-
-//     comptime {
-//         try testing.expect(eql(type, &.{ bool, f32 }, &.{ bool, f32 }));
-//         try testing.expect(!eql(type, &.{ bool, f32 }, &.{ f32, bool }));
-//         try testing.expect(!eql(type, &.{ bool, f32 }, &.{bool}));
-
-//         try testing.expect(eql(comptime_int, &.{ 1, 2, 3 }, &.{ 1, 2, 3 }));
-//         try testing.expect(!eql(comptime_int, &.{ 1, 2, 3 }, &.{ 3, 2, 1 }));
-//         try testing.expect(!eql(comptime_int, &.{1}, &.{ 1, 2 }));
-//     }
-
-//     // try testing.expect(eql(void, &.{ {}, {} }, &.{ {}, {} }));
-//     // try testing.expect(!eql(void, &.{{}}, &.{ {}, {} }));
-// }
 
 test "eql - u8 equal strings" {
     const testing = std.testing;
@@ -416,3 +413,11 @@ extern "c" fn simd_compare(a: [*]const u8, a_len: usize, b: [*]const u8, b_len: 
 extern "c" fn simd_copy_bytes(src: [*]const u8, dst: [*]u8, len: usize) void;
 
 extern "c" fn simd_to_upper(text: [*]u8, len: usize) void;
+extern "c" fn simd_index_of_space_or_newline_or_non_ascii(
+    input: [*]const u8,
+    len: usize,
+) usize;
+extern "c" fn simd_contains_newline_or_non_ascii_or_quote(
+    input: [*]const u8,
+    len: usize,
+) bool;

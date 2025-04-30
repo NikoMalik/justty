@@ -52,10 +52,10 @@ static const char *colorname[] = {
  * Default colors (colorname index)
  * foreground, background, cursor, reverse cursor
  */
-static unsigned int defaultbg = 258;
-static unsigned int defaultfg = 259;
-static unsigned int defaultcs = 256;
-static unsigned int defaultrcs = 257;
+static const unsigned int defaultbg = 258;
+static const unsigned int defaultfg = 259;
+static const unsigned int defaultcs = 256;
+static const unsigned int defaultrcs = 257;
 
 static const bool scroll_bool = true;
 

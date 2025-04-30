@@ -37,6 +37,84 @@ HWY_ATTR bool CompareImpl(const uint8_t* a, const uint8_t* b, size_t len) {
 }
 
 
+
+size_t IndexOfSpaceOrNewlineOrNonASCIIImpl(const uint8_t* HWY_RESTRICT start_ptr, size_t search_len)
+{
+    assert(search_len > 0);
+
+    D8 d;
+    const size_t N = hn::Lanes(d);
+
+    const uint8_t after_space = ' ' + 1;
+
+    const auto vec_min_ascii_including_space = hn::Set(d, after_space);
+    const auto vec_max_ascii = hn::Set(d, uint8_t { 127 });
+    size_t simd_text_len = search_len - (search_len % N);
+
+    size_t i = 0;
+    for (; i < simd_text_len; i += N) {
+        const auto vec = hn::LoadU(d, start_ptr + i);
+        const auto mask_lt_min = hn::Lt(vec, vec_min_ascii_including_space);
+        const auto mask_gt_max = hn::Gt(vec, vec_max_ascii);
+        const auto found_mask = hn::Or(mask_gt_max, mask_lt_min);
+        const intptr_t pos = hn::FindFirstTrue(d, found_mask);
+        if (pos >= 0) {
+            return i + pos;
+        }
+    }
+
+    for (; i < search_len; ++i) {
+        const uint8_t char_ = start_ptr[i];
+        if (char_ <= ' ' || char_ > 127) {
+            return i;
+        }
+    }
+
+    return search_len;
+}
+
+bool ContainsNewlineOrNonASCIIOrQuoteImpl(const uint8_t* HWY_RESTRICT text, size_t text_len)
+{
+    assert(text_len > 0);
+
+    D8 d;
+    const size_t N = hn::Lanes(d);
+
+    // SIMD constants
+    const auto vec_max_ascii = hn::Set(d, uint8_t { 127 });
+    const auto vec_min_ascii = hn::Set(d, uint8_t { 0x20 });
+    const auto vec_quote = hn::Set(d, uint8_t { '"' });
+
+    size_t i = 0;
+    const size_t simd_text_len = text_len - (text_len % N);
+
+    // Process full vectors
+    for (; i < simd_text_len; i += N) {
+        const auto vec = hn::LoadU(d, text + i);
+        const auto mask_lt_min = hn::Lt(vec, vec_min_ascii);
+        const auto mask_gt_max = hn::Gt(vec, vec_max_ascii);
+
+        const auto mask_quote_eq = hn::Eq(vec, vec_quote);
+
+        const auto found_mask = hn::Or(hn::Or(mask_gt_max, mask_lt_min), mask_quote_eq);
+
+        if (!hn::AllFalse(d, found_mask)) {
+            return true;
+        }
+    }
+
+    // Scalar check for the remainder
+    for (; i < text_len; ++i) {
+        const uint8_t char_ = text[i];
+        if (char_ > 127 || char_ < 0x20 || char_ == '"') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
 HWY_ATTR void CopyBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
     D8 d;
     size_t i = 0;
@@ -158,12 +236,26 @@ HWY_EXPORT(IndexOfAnyCharImpl);
 HWY_EXPORT(CompareImpl);
 HWY_EXPORT(CopyBytesImpl);
 HWY_EXPORT(ToUpperImpl);
+HWY_EXPORT(IndexOfSpaceOrNewlineOrNonASCIIImpl);
+HWY_EXPORT(ContainsNewlineOrNonASCIIOrQuoteImpl);
 
 
 
 
 size_t simd_base64_max_length(const char* input, size_t length) {
     return simdutf::maximal_binary_length_from_base64(input, length);
+}
+
+
+bool simd_contains_newline_or_non_ascii_or_quote(const uint8_t* HWY_RESTRICT text, size_t text_len)
+{
+    return HWY_DYNAMIC_DISPATCH(ContainsNewlineOrNonASCIIOrQuoteImpl)(text, text_len);
+}
+
+
+size_t simd_index_of_space_or_newline_or_non_ascii(const uint8_t* HWY_RESTRICT text, size_t text_len)
+{
+    return HWY_DYNAMIC_DISPATCH(IndexOfSpaceOrNewlineOrNonASCIIImpl)(text, text_len);
 }
 
 size_t simd_base64_decode(const char* input, size_t length, char* output) {
