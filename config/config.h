@@ -15,35 +15,33 @@ static const char *font = "Liberation Mono:pixelsize=12";
 static const uint16_t borderpx = 2;
 
 static const char *colorname[] = {
-    /* 8 normal colors */
-    "#181818", /* black */
-    "#F43841", /* red */
-    "#73D936", /* green */
-    "#FFDD33", /* yellow */
-    "#96A6C8", /* blue */
-    "#9E95C7", /* magenta */
-    "#95A99F", /* cyan */
-    "#E4E4E4", /* white */
+    /* 8 normal colors (regular0–regular7) */
+    "#000000",   /* 0: black       regular0 */
+    "#ff5774",   /* 1: red         regular1 */
+    "#6ae98a",   /* 2: green       regular2 */
+    "#ffe099",   /* 3: yellow      regular3 */
+    "#ff7a99",   /* 4: blue        regular4 */
+    "#e0b2a5",   /* 5: magenta     regular5 */
+    "#efdaa1",   /* 6: cyan        regular6 */
+    "#bfbfbf",   /* 7: white       regular7 */
 
-    /* 8 bright colors */
-    "#52494E", /* bright black */
-    "#FF4F58", /* bright red */
-    "#73D936", /* bright green */
-    "#FFDD33", /* bright yellow */
-    "#96A6C8", /* bright blue */
-    "#AFAFD7", /* bright magenta */
-    "#95A99F", /* bright cyan */
-    "#F5F5F5", /* bright white */
-
-    [16] = "#222222", /* indexed color 16 */
+    /* 8 bright colors (bright0–bright7) */
+    "#4d4d4d",   /* 8:  bright black   bright0 */
+    "#ff6580",   /* 9:  bright red     bright1 */
+    "#70f893",   /* 10: bright green   bright2 */
+    "#ffe6ad",   /* 11: bright yellow  bright3 */
+    "#ff8ba6",   /* 12: bright blue    bright4 */
+    "#e8c4bb",   /* 13: bright magenta bright5 */
+    "#ffe8ac",   /* 14: bright cyan    bright6 */
+    "#e6e6e6",   /* 15: bright white   bright7 */
 
     [255] = 0,
 
-    /* special colors */
-    "#E4E4E4",
-    "#181818", /* 257 -> reverse cursor (background) */
-    "#181818", /* 258 -> background */
-    "#e4e4ef", /* 259 -> foreground */
+    /* semantic colors (256–259) */
+    "#ff7a99",   /* 256: cursor color        (blueish regular4) */
+    "#efdaa1",   /* 257: reverse cursor/bg    (cyan regular6) */
+    "#000000",   /* 258: background           (kitty background) */
+    "#bfbfbf",   /* 259: foreground           (kitty foreground) */
 };
 
 

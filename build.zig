@@ -29,6 +29,10 @@ fn addDep(
     artifact.linkSystemLibrary("xcb");
     artifact.linkSystemLibrary("xinerama");
     artifact.linkSystemLibrary("xcb-cursor");
+    artifact.linkSystemLibrary("xcb-render");
+    artifact.linkSystemLibrary("xcb-renderutil");
+    artifact.linkSystemLibrary("xcb-xrm");
+
     artifact.linkLibCpp();
     artifact.linkLibC();
     const HWY_AVX3_SPR: c_int = 1 << 4;
@@ -98,23 +102,7 @@ const X11INC = "/usr/include/X11";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
     const optimize = b.standardOptimizeOption(.{});
-
-    //dependencies
-    // ==============================================================//
-    //
-    //
-    //
-    //
-    //
-    // ==============================================================//
-    // const lib_mod = b.addModule("justty", .{
-    //     .root_source_file = b.path("root.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    //     .link_libc = true,
-    // });
 
     const exe = b.addExecutable(.{
         .name = "justty",
@@ -194,6 +182,9 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("xcb");
     // exe.linkSystemLibrary2("freetype2", .{});
     exe.linkSystemLibrary("xcb-cursor");
+    exe.linkSystemLibrary("xcb-render");
+    exe.linkSystemLibrary("xcb-renderutil");
+    exe.linkSystemLibrary("xcb-xrm");
 
     // exe.linkSystemLibrary("freetype");
     // exe.linkSystemLibrary("Xft");
@@ -211,18 +202,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     addDep(unit_tests, b, target, optimize);
-
-    // unit_tests.addIncludePath(b.path("./include/"));
-    // unit_tests.linkSystemLibrary("xcb-cursor");
-
-    // unit_tests.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-    // unit_tests.linkSystemLibrary("freetype2");
-    // unit_tests.linkSystemLibrary("fontconfig");
-    // unit_tests.linkSystemLibrary("X11");
-    // unit_tests.linkSystemLibrary("xinerama");
-    // unit_tests.linkSystemLibrary("freetype");
-    // unit_tests.linkSystemLibrary("Xft");
-    // unit_tests.linkSystemLibrary("xcb");
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);

@@ -1,7 +1,12 @@
 fast:
 	@zig build -Doptimize=ReleaseFast
+
 test:
-	@zig build test
+	@zig build test  
+
+try: fast
+	@./zig-out/bin/justty
+	
 
 debug:
 	@zig build -Doptimize=Debug
