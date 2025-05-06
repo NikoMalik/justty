@@ -6,6 +6,7 @@ const log = std.log;
 const xlib = @import("x.zig");
 const util = @import("util.zig");
 const print = std.debug.print;
+const xcb_font = @import("xcb_font.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -27,7 +28,41 @@ const STR_ARG_SIZ = ESC_ARG_SIZ;
 
 //=========================//* utf consts //=======================
 //
+//  Terminal Emulator (Parent Process)
+//  Master: Used by the parent (terminal emulator) to send input to and receive output from the child.
+//  Slave: Used by the child (shell) to receive input and send output, acting as its terminal.
+//   |
+//   |--- Holds self.master (fd)
+//   |      |
+//   |      |--- Write: Sends input (e.g., "ls\n") to child
+//   |      |--- Read: Receives output (e.g., "file1 file2\n") from child
+//   |
+//   |--- Forks child process
+//   |
+// Shell (Child Process)
+//   |
+//   |--- Uses self.slave (fd, redirected to STDIN/STDOUT/STDERR)
+//   |      |
+//   |      |--- Read: Receives input from parent (via master)
+//   |      |--- Write: Sends output to parent (via master)
+//
+// Master:
 
+// The master end is a file descriptor used by the parent process (e.g., your terminal emulator).
+// It acts as the controlling side of the PTY, allowing the parent to:
+//     Write data to the PTY, which appears as input to the child process (e.g., typing commands in the terminal).
+//     Read data from the PTY, which is the output produced by the child process (e.g., command output like ls or echo).
+// The master is typically held open by the terminal emulator to interact with the child process running in the PTY.
+//
+//
+// Slave:
+
+// The slave end is a file descriptor used by the child process (e.g., a shell like bash or zsh).
+// It acts as the terminal device for the child, behaving like a real terminal (e.g., /dev/tty).
+// The child process:
+//     Reads from the slave to get input (e.g., user commands sent via the master).
+//     Writes to the slave to produce output (e.g., command results, which are then read by the master).
+// The slave is redirected to the child’s standard input (STDIN), output (STDOUT), and error (STDERR) via dup2 in my exec function.
 pub const Pty = struct {
     const fd = posix.fd_t;
     extern "c" fn setsid() std.c.pid_t; // new session
@@ -87,35 +122,88 @@ pub const Pty = struct {
         };
     }
 
-    pub fn ttyhangup(self: *Self) void {
+    pub fn ttyhangup(self: *Self) !void {
         // Send SIGHUP to shell
-        _ = c.kill(self.master, c.SIGHUP);
+        try posix.kill(self.master, posix.SIG.HUP);
     }
 
-    pub fn exec(self: *Self, pid: posix.pid_t) !void {
-        self.pid = pid;
-        const shell = getShellPath();
-        if (pid != 0) {
-            // log.warn("fork failed: {}", .{});
-            posix.close(self.slave);
+    pub fn killit(self: *Self) !void {
+        try posix.kill(self.pid, posix.SIG.TERM);
+    }
+
+    pub fn write(self: *Self, str: []const u8) !usize {
+        var bytes = str;
+        var total_written: usize = 0;
+        while (bytes.len > 0) {
+            const written = try posix.write(self.master, bytes);
+            total_written += written;
+            bytes = bytes[written..];
         }
+        return total_written;
+    }
+
+    pub fn read(self: *Self, buf: []u8) !usize {
+        return posix.read(self.master, buf);
+    }
+
+    pub fn exec(self: *Self, pid: posix.pid_t) !posix.pid_t {
+        if (pid == -1) {
+            return error.ForkFailed;
+        }
+
         if (pid == 0) {
-            const sid = setsid();
-            if (sid == -1) {
-                return error.SetSid_failed;
+            // Child process
+            // Create a new session
+            if (pty.setsid() == -1) {
+                std.c._exit(1);
             }
-            const ff = c.ioctl(self.slave, c.TIOCSCTTY, @as(c_int, 0));
-            if (ff == -1) return error.IdkIoctl_exec;
-            try posix.dup2(self.slave, posix.STDIN_FILENO);
-            try posix.dup2(self.slave, posix.STDOUT_FILENO);
-            try posix.dup2(self.slave, posix.STDERR_FILENO);
+
+            // Set the slave PTY as the controlling terminal
+            if (pty.ioctl(self.slave, pty.TIOCSCTTY, @as(c_int, 0)) == -1) {
+                std.c._exit(1);
+            }
+
+            // Redirect STDIN, STDOUT, STDERR to the slave PTY
+            posix.dup2(self.slave, posix.STDIN_FILENO) catch std.c._exit(1);
+            posix.dup2(self.slave, posix.STDOUT_FILENO) catch std.c._exit(1);
+            posix.dup2(self.slave, posix.STDERR_FILENO) catch std.c._exit(1);
             posix.close(self.slave);
 
-            // const e = posix.execvpeZ("/bin/echo", &[_:null]?[*:0]const u8{ "sh", null, null }, std.c.environ);
-            const e = std.posix.execvpeZ(shell, &.{ shell, null }, std.c.environ);
-            std.debug.print("could not exec shell: {}\n", .{e});
-            std.c.exit(1);
+            // Reset signal handlers in the child
+            var sa: posix.Sigaction = .{
+                .handler = .{ .handler = posix.SIG.DFL },
+                .mask = posix.empty_sigset,
+                .flags = 0,
+            };
+            posix.sigaction(posix.SIG.ABRT, &sa, null);
+            posix.sigaction(posix.SIG.ALRM, &sa, null);
+            posix.sigaction(posix.SIG.BUS, &sa, null);
+            posix.sigaction(posix.SIG.CHLD, &sa, null);
+            posix.sigaction(posix.SIG.FPE, &sa, null);
+            posix.sigaction(posix.SIG.HUP, &sa, null);
+            posix.sigaction(posix.SIG.ILL, &sa, null);
+            posix.sigaction(posix.SIG.INT, &sa, null);
+            posix.sigaction(posix.SIG.PIPE, &sa, null);
+            posix.sigaction(posix.SIG.SEGV, &sa, null);
+            posix.sigaction(posix.SIG.TRAP, &sa, null);
+            posix.sigaction(posix.SIG.TERM, &sa, null);
+            posix.sigaction(posix.SIG.QUIT, &sa, null);
+
+            _ = c.unsetenv("COLUMNS");
+            _ = c.unsetenv("LINES");
+
+            // Execute the shell
+            const shell = getShellPath();
+            std.posix.execvpeZ(shell, &.{ shell, null }, std.c.environ) catch {
+                std.c._exit(1);
+            };
+            unreachable; // execvpeZ replaces the process
         }
+
+        // Parent process
+        posix.close(self.slave);
+        self.pid = pid;
+        return pid;
     }
 
     inline fn getShellPath() [:0]const u8 {
@@ -152,54 +240,104 @@ pub const Pty = struct {
     }
 };
 
+test "Pty open and exec" {
+    const testing = std.testing;
+    const size = winsize{
+        .ws_row = 24,
+        .ws_col = 80,
+        .ws_xpixel = 0,
+        .ws_ypixel = 0,
+    };
+
+    var pty_instance = try Pty.open(size);
+    defer pty_instance.deinit();
+
+    // Test PTY creation
+    try testing.expect(pty_instance.master >= 0);
+    try testing.expect(pty_instance.slave >= 0);
+
+    // Test exec (fork and execute shell)
+    const pid = try posix.fork();
+    _ = try pty_instance.exec(pid);
+    try testing.expect(pid > 0);
+    try testing.expectEqual(pid, pty_instance.pid);
+
+    // Test writing to PTY
+    const input = "echo Hello\n";
+    const written = try pty_instance.write(input);
+    try testing.expectEqual(input.len, written);
+
+    // Test reading from PTY (may require polling due to non-blocking mode)
+    var buf: [128]u8 = undefined;
+    var total_read: usize = 0;
+    while (total_read == 0) {
+        total_read = pty_instance.read(buf[0..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        std.time.sleep(10 * std.time.ns_per_ms); // Wait briefly
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, buf[0..total_read], 1, "Hello"));
+
+    // Clean up child process
+    // try posix.kill(pid, posix.SIG.TERM);
+    try pty_instance.killit();
+    // try pty_instance.ttyhangup();
+}
+
 pub fn main() !void {
     if (comptime util.isDebug) {
+        _ = xcb_font;
         var alloc = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
         defer _ = alloc.deinit();
         const allocator = alloc.allocator();
         _ = c.setlocale(c.LC_CTYPE, "");
         // _ = c.XSetLocaleModifiers("");
-        std.debug.print("hello ", .{});
-        std.debug.print("font : {s}\n", .{c.font});
 
         //bench TODO:make another folder with benches
 
-        const s1 = "hello world";
-        const s2 = "hello world";
-        const s3 = "hello worlD";
+        // const s1 = "hello world";
+        // const s2 = "hello world";
+        // const s3 = "hello worlD";
 
-        // Medium buffer
-        const med_size = 10_000;
-        const med1 = try createTestBuffer(allocator, med_size, 'A');
-        defer allocator.free(med1);
-        const med2 = try createTestBuffer(allocator, med_size, 'A');
-        defer allocator.free(med2);
-        const med3 = try createTestBuffer(allocator, med_size, 'B');
-        defer allocator.free(med3);
+        // // Medium buffer
+        // const med_size = 10_000;
+        // const med1 = try createTestBuffer(allocator, med_size, 'A');
+        // defer allocator.free(med1);
+        // const med2 = try createTestBuffer(allocator, med_size, 'A');
+        // defer allocator.free(med2);
+        // const med3 = try createTestBuffer(allocator, med_size, 'B');
+        // defer allocator.free(med3);
 
-        // Large buffer
-        const large_size = 1_000_000;
-        const large1 = try createTestBuffer(allocator, large_size, 'X');
-        defer allocator.free(large1);
-        const large2 = try createTestBuffer(allocator, large_size, 'X');
-        defer allocator.free(large2);
-        const large3 = try createTestBuffer(allocator, large_size, 'Y');
-        defer allocator.free(large3);
+        // // Large buffer
+        // const large_size = 1_000_000;
+        // const large1 = try createTestBuffer(allocator, large_size, 'X');
+        // defer allocator.free(large1);
+        // const large2 = try createTestBuffer(allocator, large_size, 'X');
+        // defer allocator.free(large2);
+        // const large3 = try createTestBuffer(allocator, large_size, 'Y');
+        // defer allocator.free(large3);
 
-        print("\n=== Small strings (12 bytes) ===\n", .{});
-        try runBenchmark("Identical", s1, s2);
-        try runBenchmark("Different last char", s1, s3);
+        // print("\n=== Small strings (12 bytes) ===\n", .{});
+        // try runBenchmark("Identical", s1, s2);
+        // try runBenchmark("Different last char", s1, s3);
 
-        print("\n=== Medium buffers (10,000 bytes) ===\n", .{});
-        try runBenchmark("Identical", med1, med2);
-        try runBenchmark("Different middle", med1, med3);
+        // print("\n=== Medium buffers (10,000 bytes) ===\n", .{});
+        // try runBenchmark("Identical", med1, med2);
+        // try runBenchmark("Different middle", med1, med3);
 
-        print("\n=== Large buffers (1,000,000 bytes) ===\n", .{});
-        try runBenchmark("Identical", large1, large2);
-        try runBenchmark("Completely different", large1, large3);
+        // print("\n=== Large buffers (1,000,000 bytes) ===\n", .{});
+        // try runBenchmark("Identical", large1, large2);
+        // try runBenchmark("Completely different", large1, large3);
 
         var term = try xlib.XlibTerminal.init(allocator);
         defer term.deinit();
+        // while (true) {
+        //     try term.redraw2();
+        // }
+        // while (true) {
+        //     try term.testing();
+        // }
         try term.run();
     } else {
         const allocator = std.heap.c_allocator;
@@ -208,6 +346,7 @@ pub fn main() !void {
 
         var term = try xlib.XlibTerminal.init(allocator);
         defer term.deinit();
+        // term.testing();
         try term.run();
     }
 }

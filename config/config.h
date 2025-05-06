@@ -10,11 +10,12 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static const char font[] = "Liberation Mono:pixelsize=12";
+static const char font[] = "Iosevka Nerd Font Mono:pixelsize=12";
 
 static const uint16_t borderpx = 2;
 
-static const char *colorname[] = {
+
+ static const char *colorname[] = {
     /* 8 normal colors (regular0–regular7) */
     "#000000",   /* 0: black       regular0 */
     "#ff5774",   /* 1: red         regular1 */
