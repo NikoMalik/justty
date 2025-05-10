@@ -97,8 +97,6 @@ comptime {
 }
 
 const prefix = "/usr/local";
-const X11LIB = "/usr/lib64/X11";
-const X11INC = "/usr/include/X11";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

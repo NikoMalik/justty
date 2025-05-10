@@ -36,8 +36,56 @@ HWY_ATTR bool CompareImpl(const uint8_t* a, const uint8_t* b, size_t len) {
     return true;
 }
 
+HWY_ATTR size_t IndexOfCsiStartImpl(const uint8_t* input, size_t len) {
+    D8 d;
+    const size_t N = hn::Lanes(d);
+    const auto esc = hn::Set(d, 0x1B);
+    const auto bracket = hn::Set(d, 0x5B);
+    size_t i = 0;
+    for (; i + N <= len; i += N) {
+        auto v1 = hn::LoadN(d, input + i, N);
+        auto v2 = hn::LoadN(d, input + i + 1, N);
+        auto mask = hn::And(hn::Eq(v1, esc), hn::Eq(v2, bracket));
+        intptr_t pos = hn::FindFirstTrue(d, mask);
+        if (pos >= 0) return i + pos;
+    }
+    for (; i < len - 1; i++) {
+        if (input[i] == 0x1B && input[i + 1] == 0x5B) return i;
+    }
+    return len;
+}
 
 
+HWY_ATTR size_t ExtractCsiSeqImpl(const uint8_t* input, size_t len, size_t start, size_t* end) {
+    // Validate CSI prefix: ESC (0x1B) followed by '['
+    if (start + 1 >= len || input[start] != 0x1B || input[start + 1] != '[') {
+        return 0;
+    }
+
+    D8 d;
+    const size_t N = hn::Lanes(d);
+    const auto a = hn::Set(d, 'A');
+    const auto z = hn::Set(d, 'z');
+    size_t i = start + 2; // Skip ESC[
+    for (; i + N <= len; i += N) {
+        auto v = hn::LoadN(d, input + i, N);
+        auto mask = hn::Or(hn::And(hn::Ge(v, a), hn::Le(v, hn::Set(d, 'Z'))),
+                           hn::And(hn::Ge(v, hn::Set(d, 'a')), hn::Le(v, z)));
+        intptr_t pos = hn::FindFirstTrue(d, mask);
+        if (pos >= 0) {
+            *end = i + pos + 1;
+            return *end - start;
+        }
+    }
+    for (; i < len; i++) {
+        uint8_t c = input[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            *end = i + 1;
+            return *end - start;
+        }
+    }
+    return 0;
+}
 size_t IndexOfSpaceOrNewlineOrNonASCIIImpl(const uint8_t* HWY_RESTRICT start_ptr, size_t search_len)
 {
     assert(search_len > 0);
@@ -238,6 +286,10 @@ HWY_EXPORT(CopyBytesImpl);
 HWY_EXPORT(ToUpperImpl);
 HWY_EXPORT(IndexOfSpaceOrNewlineOrNonASCIIImpl);
 HWY_EXPORT(ContainsNewlineOrNonASCIIOrQuoteImpl);
+HWY_EXPORT(IndexOfCsiStartImpl);
+HWY_EXPORT(ExtractCsiSeqImpl);
+
+
 
 
 
@@ -251,6 +303,16 @@ bool simd_contains_newline_or_non_ascii_or_quote(const uint8_t* HWY_RESTRICT tex
 {
     return HWY_DYNAMIC_DISPATCH(ContainsNewlineOrNonASCIIOrQuoteImpl)(text, text_len);
 }
+
+size_t simd_index_of_csi_start(const uint8_t* input, size_t len) {
+    return HWY_DYNAMIC_DISPATCH(IndexOfCsiStartImpl)(input, len);
+}
+
+
+size_t simd_extract_csi_sequence(const uint8_t* input, size_t len, size_t start, size_t* end) {
+    return HWY_DYNAMIC_DISPATCH(ExtractCsiSeqImpl)(input, len, start, end);
+}
+
 
 
 size_t simd_index_of_space_or_newline_or_non_ascii(const uint8_t* HWY_RESTRICT text, size_t text_len)

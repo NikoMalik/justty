@@ -1,10 +1,154 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const unicode = std.unicode;
 
 pub fn maxLen(input: []const u8) usize {
     return simd_base64_max_length(input.ptr, input.len);
 }
 
+pub inline fn safeLongToI16(value: c_long) !i16 {
+    return if (value > std.math.maxInt(i16))
+        error.Overflow
+    else if (value < std.math.minInt(i16))
+        error.Underflow
+    else
+        @intCast(value);
+}
+
+pub inline fn safeCast(c_ulong_val: c_ulong) !i16 {
+    return if (c_ulong_val > @as(c_ulong, @intCast(std.math.maxInt(i16))))
+        error.Overflow
+    else if (c_ulong_val < @as(c_ulong, @intCast(std.math.minInt(i16))))
+        error.Underflow
+    else
+        @intCast(c_ulong_val);
+}
+
+pub inline fn maskbase(m: u32) i16 {
+    if (m == 0) return 0;
+    var i: i16 = 0;
+    var mask = m;
+    while (mask & 1 == 0) {
+        mask >>= 1;
+        i += 1;
+    }
+    return i;
+}
+
+pub inline fn masklen(m: u64) i16 {
+    var y = (m >> 1) & 0x3333333333333333;
+    y = m - y - ((y >> 1) & 0x3333333333333333);
+    y = (y + (y >> 3)) & 0x0707070707070707;
+    return @as(i16, @intCast(y % 63));
+}
+
+pub inline fn getCodepointLength(comptime T: type, cp: T) u3 {
+    return switch (cp) {
+        0x00000...0x00007F => @as(u3, 1),
+        0x00080...0x0007FF => @as(u3, 2),
+        0x00800...0x00FFFF => @as(u3, 3),
+        0x10000...0x10FFFF => @as(u3, 4),
+        else => @as(u3, 0),
+    };
+}
+
+pub inline fn utf8Encode(comptime T: type, cp: T, out: []u8) u3 {
+    const length = getCodepointLength(T, cp);
+
+    switch (length) {
+        1 => {
+            out[0] = @truncate(cp);
+        },
+
+        2 => {
+            out[0] = @truncate(0xC0 | (cp >> 6));
+            out[1] = @truncate(0x80 | (cp & 0x3F));
+        },
+
+        3 => {
+            out[0] = @truncate(0xE0 | (cp >> 12));
+            out[1] = @truncate(0x80 | ((cp >> 6) & 0x3F));
+            out[2] = @truncate(0x80 | (cp & 0x3F));
+        },
+
+        4 => {
+            out[0] = @truncate(0xF0 | (cp >> 18));
+            out[1] = @truncate(0x80 | ((cp >> 12) & 0x3F));
+            out[2] = @truncate(0x80 | ((cp >> 6) & 0x3F));
+            out[3] = @truncate(0x80 | (cp & 0x3F));
+        },
+
+        else => unreachable,
+    }
+
+    return length;
+}
+/// Returns `true` if the character is printable
+/// (`A-Z`, `a-z`, `0-9`, `punctuation marks`, `space`).
+pub inline fn isPrintable(c: u8) bool {
+    return switch (c) {
+        ' '...'~' => true,
+        else => false,
+    };
+}
+
+/// Returns true if the character is a control character
+/// (`ASCII 0x00-0x1F or 0x7F`).
+pub inline fn isControl(c: u8) bool {
+    return (c <= 0x1F) or (c == 0x7F);
+}
+
+pub fn utf8_validate_pos(input: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < input.len) {
+        const len = unicode.utf8ByteSequenceLength(input[i]) catch return i;
+        if (i + len > input.len) return i;
+        if (!utf8_validate(input[i .. i + len])) return i;
+        i += len;
+    }
+    return i;
+}
+
+pub fn utf8_validate(input: []const u8) bool {
+    return simd_validate_utf8(input.ptr, input.len);
+}
+
+/// find begin CSI escape (\x1B[).
+/// return index of begin or null, if not found.
+pub fn indexOfCsiStart(input: []const u8) ?usize {
+    const result = simd_index_of_csi_start(input.ptr, input.len);
+    return if (result == input.len) null else result;
+}
+
+test "indexOfCsiStart" {
+    const testing = std.testing;
+    const input = "\x1B[31mHello";
+    try testing.expectEqual(@as(usize, 0), indexOfCsiStart(input).?);
+    try testing.expectEqual(null, indexOfCsiStart("No CSI"));
+    try testing.expectEqual(@as(usize, 5), indexOfCsiStart("Hello\x1B[m").?);
+}
+
+/// extract full CSI escape, begin from index.
+/// return slice sequence  or null, if csi incorrect.
+pub fn extractCsiSequence(input: []const u8, start: usize) ?[]const u8 {
+    var end: usize = undefined;
+    const len = simd_extract_csi_sequence(input.ptr, input.len, start, &end);
+    return if (len > 0) input[start..end] else null;
+}
+
+test "extractCsiSequence" {
+    const testing = std.testing;
+    const input = "\x1B[31mHello";
+    if (indexOfCsiStart(input)) |csi| {
+        try testing.expectEqualStrings("\x1B[31m", extractCsiSequence(input, csi).?);
+    } else {
+        std.log.err("Expected CSI start in input", .{});
+    }
+
+    try testing.expectEqual(null, extractCsiSequence("No CSI", 0));
+    try testing.expectEqual(null, extractCsiSequence("\x1B[123", 0));
+    try testing.expectEqualStrings("\x1B[m", extractCsiSequence("Hello\x1B[m", 5).?);
+}
 pub fn decode_base64(input: []const u8, output: []u8) ![]const u8 {
     const res = simd_base64_decode(input.ptr, input.len, output.ptr);
     if (res < 0) return error.Base64Invalid;
@@ -23,6 +167,12 @@ pub fn decode_utf8_to_utf32(input: []const u8, output: []u32) ![]const u32 {
     return output[0..res];
 }
 
+pub fn decode_utf32_to_utf8(input: []const u32, output: []const u8) ![]const u8 {
+    const res = simd_convert_utf32_to_utf8(input.ptr, utf32_len_from_utf8(input), output.ptr);
+    if (res == 0) return error.Utf32DecodeFailed;
+    return output[0..res];
+}
+
 pub fn detectEncodings(input: []const u8) u32 {
     return @bitCast(simd_detect_encodings(input.ptr, input.len));
 }
@@ -31,8 +181,17 @@ test "detectEncodings" {
     const testing = std.testing;
     const utf8 = "Hello 😊";
     const utf16le = "\x48\x00\x65\x00\x6C\x00\x6C\x00\x6F\x00"; // "Hello" in UTF-16LE
+    // UTF-32LE check ("Hello" + emoj 😊)
+    // H(0x48 0x00 0x00 0x00) e(0x65 0x00...) l l o 😊(0x0A 0xF6 0x01 0x00)
+    const utf32le = "\x48\x00\x00\x00" ++
+        "\x65\x00\x00\x00" ++
+        "\x6C\x00\x00\x00" ++
+        "\x6C\x00\x00\x00" ++
+        "\x6F\x00\x00\x00" ++
+        "\x0A\xF6\x01\x00";
     try testing.expect(detectEncodings(utf8) & 0x1 != 0); // UTF-8 flag
     try testing.expect(detectEncodings(utf16le) & 0x2 != 0); // UTF-16LE flag
+    try testing.expect(detectEncodings(utf32le) & 0x3 != 0); // UTF-32LE flag
 }
 
 pub fn utf32_len_from_utf8(input: []const u8) usize {
@@ -87,6 +246,19 @@ pub fn indexOf_any_char(haystack: []const u8, chars: []const u8) ?usize {
     }
 
     return if (result == haystack.len) null else result;
+}
+
+pub inline fn containsChar(input: []const u8, char: u8) bool {
+    return indexOf_char(input, char) != null;
+}
+
+pub fn containsCharT(comptime T: type, input: []const T, char: T) bool {
+    return switch (T) {
+        u8 => containsChar(input, char),
+        u16 => std.mem.indexOfScalar(u16, input, char) != null,
+        u32 => std.mem.indexOfScalar(u32, input, char) != null,
+        else => @compileError("invalid type"),
+    };
 }
 
 test "indexOfChar" {
@@ -400,7 +572,7 @@ extern "c" fn simd_index_of_char(
     needle: u8,
 ) usize;
 
-extern "c" fn simd_index_of_any_char(
+pub extern "c" fn simd_index_of_any_char(
     text: [*]const u8,
     text_len: usize,
     chars: [*]const u8,
@@ -421,3 +593,10 @@ extern "c" fn simd_contains_newline_or_non_ascii_or_quote(
     input: [*]const u8,
     len: usize,
 ) bool;
+
+extern "c" fn simd_index_of_csi_start(input: [*]const u8, len: usize) usize;
+extern "c" fn simd_extract_csi_sequence(input: [*]const u8, len: usize, start: usize, end: *usize) usize;
+extern "c" fn simd_parse_csi_params(csi: [*]const u8, len: usize, params: [*]i32, max_params: usize) usize;
+extern "c" fn simd_get_csi_command_type(csi: [*]const u8, len: usize) u8;
+extern "c" fn simd_is_valid_csi(input: [*]const u8, len: usize) bool;
+extern "c" fn simd_count_utf8_in_csi(csi: [*]const u8, len: usize) usize;
