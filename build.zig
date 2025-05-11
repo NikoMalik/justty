@@ -29,6 +29,7 @@ fn addDep(
     artifact.linkSystemLibrary("xcb");
     artifact.linkSystemLibrary("xinerama");
     artifact.linkSystemLibrary("xcb-cursor");
+    artifact.linkSystemLibrary("xcb-keysyms");
     artifact.linkSystemLibrary("xcb-render");
     artifact.linkSystemLibrary("xcb-renderutil");
     artifact.linkSystemLibrary("xcb-xrm");
@@ -180,6 +181,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("xcb");
     // exe.linkSystemLibrary2("freetype2", .{});
     exe.linkSystemLibrary("xcb-cursor");
+    exe.linkSystemLibrary("xcb-keysyms");
     exe.linkSystemLibrary("xcb-render");
     exe.linkSystemLibrary("xcb-renderutil");
     exe.linkSystemLibrary("xcb-xrm");

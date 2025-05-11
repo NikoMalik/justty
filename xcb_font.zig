@@ -117,7 +117,7 @@ pub fn getPixelSize(pattern: *Pattern, dpi: f64) f64 {
         return 6.0;
     }
 
-    std.log.debug("Using pixel size: {d}", .{adjusted_pixel_size});
+    // std.log.debug("Using pixel size: {d}", .{adjusted_pixel_size});
     return adjusted_pixel_size;
 }
 pub fn createTextPixmap(
@@ -675,7 +675,7 @@ pub const FreeType = struct {
 
         const char_size = pixel_size * 64.0;
         const dpi_uint: c.FT_UInt = @intFromFloat(dpi);
-        std.log.info("Setting char_size: {d}, dpi: {}", .{ @as(u32, @intFromFloat(char_size / 64)), dpi_uint });
+        // std.log.info("Setting char_size: {d}, dpi: {}", .{ @as(u32, @intFromFloat(char_size / 64)), dpi_uint });
         try intToError(c.FT_Set_Char_Size(
             face,
             0,
@@ -812,15 +812,34 @@ pub const XRenderFont = struct {
         }
         defer std.c.free(geo_reply);
         const actual_depth = geo_reply.*.depth;
-        const utf_holder = UtfHolder{ .str = text.ptr, .length = @intCast(text.len) };
+        std.log.debug("Pixmap depth: {}", .{actual_depth});
+
+        // Filter out non-printable codepoints and invalid Unicode
+        var filtered_text = try self.allocator.alloc(u32, text.len);
+        defer self.allocator.free(filtered_text);
+        var filtered_len: usize = 0;
+        for (text) |codepoint| {
+            if (codepoint < 0x20 or codepoint > 0x10FFFF) {
+                std.log.debug("Skipping invalid or non-printable codepoint: U+{x:0>4}", .{codepoint});
+                continue;
+            }
+            filtered_text[filtered_len] = codepoint;
+            filtered_len += 1;
+        }
+
+        if (filtered_len == 0) {
+            std.log.warn("No printable codepoints to render", .{});
+            return c.FT_Vector{ .x = 0, .y = 0 };
+        }
+
+        const utf_holder = UtfHolder{ .str = filtered_text.ptr, .length = @intCast(filtered_len) };
         const fmt_rep = c.xcb_render_util_query_formats(self.conn);
 
-        // Select the appropriate format based on the pixmap depth
         const fmt = switch (actual_depth) {
             24 => c.xcb_render_util_find_standard_format(fmt_rep, c.XCB_PICT_STANDARD_RGB_24),
             32 => c.xcb_render_util_find_standard_format(fmt_rep, c.XCB_PICT_STANDARD_ARGB_32),
             else => {
-                std.log.err("unsuported depth pixmap: {}", .{actual_depth});
+                std.log.err("unsupported depth pixmap: {}", .{actual_depth});
                 return error.UnsupportedDepth;
             },
         };
@@ -839,7 +858,7 @@ pub const XRenderFont = struct {
 
         if (c.xcb_request_check(self.conn, cookie)) |err| {
             std.log.err("Could not create picture: {}", .{err.*.error_code});
-            return XcbftError.PictureCreationFailed;
+            return error.PictureCreationFailed;
         }
         defer _ = c.xcb_render_free_picture(self.conn, picture);
 
@@ -850,7 +869,7 @@ pub const XRenderFont = struct {
         defer _ = c.xcb_render_free_glyph_set(self.conn, glyphset_advance.glyphset);
 
         const ts = c.xcb_render_util_composite_text_stream(glyphset_advance.glyphset, utf_holder.length, 0) orelse
-            return XcbftError.MemoryAllocationFailed;
+            return error.MemoryAllocationFailed;
         defer c.xcb_render_util_composite_text_free(ts);
 
         c.xcb_render_util_glyphs_32(ts, x, y, utf_holder.length, utf_holder.str);
@@ -866,13 +885,13 @@ pub const XRenderFont = struct {
             ts,
         );
 
+        _ = c.xcb_flush(self.conn);
         return glyphset_advance.advance;
     }
     fn createPen(self: *Self, color: c.xcb_render_color_t) !c.xcb_render_picture_t {
         const fmt_rep = c.xcb_render_util_query_formats(self.conn);
         const fmt = c.xcb_render_util_find_standard_format(fmt_rep, c.XCB_PICT_STANDARD_ARGB_32);
 
-        // const root = c.xcb_setup_roots_iterator(c.xcb_get_setup(self.conn)).data.*.root;
         const pm = c.xcb_generate_id(self.conn);
         _ = c.xcb_create_pixmap(self.conn, 32, pm, xlib.get_main_window(self.conn), 1, 1);
 
@@ -898,33 +917,30 @@ pub const XRenderFont = struct {
         _ = c.xcb_render_create_glyph_set(self.conn, gs, fmt_a8.*.id);
 
         const pixel_size = getPixelSize(self.pattern, self.dpi);
-        std.log.info("Using pixel_size for glyphs: {d}", .{@as(u32, @intFromFloat(pixel_size))});
+        std.log.debug("Using pixel_size for glyphs: {d}", .{pixel_size});
 
         for (0..text.length) |i| {
             const codepoint = text.str[i];
             if (codepoint > 0x10FFFF) {
-                // std.log.warn("Invalid Unicode codepoint: 0x{x}", .{codepoint});
+                // std.log.warn("Invalid Unicode codepoint: U+{x:0>4}", .{codepoint});
                 continue;
             }
 
-            const glyph_index = self.ft.getCharIndex(codepoint);
-
             var glyph_advance: c.FT_Vector = undefined;
+            const glyph_index = self.ft.getCharIndex(codepoint);
 
             if (glyph_index != null) {
                 glyph_advance = try self.loadGlyph(gs, codepoint);
             } else {
-                // Fallback to a font that supports the codepoint
                 var unsupported_ft = try fc.queryByCharSupport(codepoint, self.pattern, self.dpi);
                 defer unsupported_ft.deinit();
 
                 if (unsupported_ft.face == null) {
-                    std.log.err("No font found supporting character: U+{x:0>4}", .{codepoint});
-                    glyph_advance = try self.loadGlyph(gs, codepoint); // Use default glyph
+                    std.log.warn("No font found supporting character: U+{x:0>4}", .{codepoint});
+                    glyph_advance = c.FT_Vector{ .x = @intFromFloat(pixel_size * 0.6), .y = 0 }; // Default advance
                 } else {
                     const char_size = pixel_size * 64.0;
                     const dpi_uint: c_uint = @intFromFloat(self.dpi);
-                    std.log.info("Setting fallback font char_size: {}, dpi: {}", .{ char_size, dpi_uint });
                     try intToError(c.FT_Set_Char_Size(
                         unsupported_ft.face.?,
                         0,
@@ -942,21 +958,32 @@ pub const XRenderFont = struct {
         return .{ .glyphset = gs, .advance = total_advance };
     }
     pub fn loadGlyph(self: *Self, gs: c.xcb_render_glyphset_t, charcode: u32) !c.FT_Vector {
-        if (self.ft.face == null) return XcbftError.FontEmptyFace;
+        if (self.ft.face == null) return error.FontEmptyFace;
         const face = self.ft.face.?;
 
         _ = c.FT_Select_Charmap(face, c.ft_encoding_unicode);
         const glyph_index = c.FT_Get_Char_Index(face, charcode);
         if (glyph_index == 0) {
-            std.log.warn("No glyph found for character U+{x:0>4}", .{charcode});
-            return c.FT_Vector{ .x = 0, .y = 0 }; // Return zero advance for missing glyph
+            std.log.debug("No glyph found for character U+{x:0>4}", .{charcode});
+            const pixel_size = getPixelSize(self.pattern, self.dpi);
+            return c.FT_Vector{ .x = @intFromFloat(pixel_size * 0.6), .y = 0 }; // Default advance
         }
 
-        // Use FT_LOAD_RENDER with antialiasing
         try intToError(c.FT_Load_Glyph(face, glyph_index, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_NORMAL));
         try intToError(c.FT_Render_Glyph(face.*.glyph, c.FT_RENDER_MODE_NORMAL));
 
         const bitmap = &face.*.glyph.*.bitmap;
+        // Handle space character (U+0020) explicitly
+        if (charcode == 0x20 or bitmap.*.width == 0 or bitmap.*.rows == 0) {
+            const advance_x = @divTrunc(face.*.glyph.*.advance.x, 64);
+            if (charcode == 0x20) {
+                // std.log.debug("Space character (U+0020) detected, using advance: {}", .{advance_x});
+            } else {
+                std.log.debug("Empty bitmap for glyph U+{x:0>4}, using advance: {}", .{ charcode, advance_x });
+            }
+            return c.FT_Vector{ .x = advance_x, .y = 0 };
+        }
+
         var ginfo = c.xcb_render_glyphinfo_t{
             .x = @intCast(-face.*.glyph.*.bitmap_left),
             .y = @intCast(face.*.glyph.*.bitmap_top),
@@ -975,27 +1002,42 @@ pub const XRenderFont = struct {
         @memset(tmpbitmap, 0);
 
         for (0..@as(usize, @intCast(ginfo.height))) |y| {
-            @memcpy(
-                tmpbitmap[y * @as(usize, @intCast(stride)) ..][0..@as(usize, @intCast(ginfo.width))],
-                bitmap.*.buffer[@as(usize, @intCast(y * ginfo.width))..][0..@as(usize, @intCast(ginfo.width))],
-            );
+            if (bitmap.*.buffer) |buf| {
+                @memcpy(
+                    tmpbitmap[y * @as(usize, @intCast(stride)) ..][0..@as(usize, @intCast(ginfo.width))],
+                    buf[@as(usize, @intCast(y * bitmap.*.width))..][0..@as(usize, @intCast(ginfo.width))],
+                );
+            }
         }
 
-        _ = c.xcb_render_add_glyphs_checked(self.conn, gs, 1, &gid, &ginfo, stride * ginfo.height, tmpbitmap.ptr);
+        const cookie = c.xcb_render_add_glyphs_checked(self.conn, gs, 1, &gid, &ginfo, stride * ginfo.height, tmpbitmap.ptr);
+        if (c.xcb_request_check(self.conn, cookie)) |err| {
+            std.log.err("Failed to add glyph U+{x:0>4}: {}", .{ charcode, err.*.error_code });
+            return error.PictureCreationFailed;
+        }
         _ = c.xcb_flush(self.conn);
 
         return glyph_advance;
     }
-
     fn loadGlyphWithFace(self: *Self, gs: c.xcb_render_glyphset_t, face: c.FT_Face, charcode: u32) !c.FT_Vector {
         _ = c.FT_Select_Charmap(face, c.ft_encoding_unicode);
         const glyph_index = c.FT_Get_Char_Index(face, charcode);
+        if (glyph_index == 0) {
+            std.log.debug("No glyph found in fallback font for character U+{x:0>4}", .{charcode});
+            const pixel_size = getPixelSize(self.pattern, self.dpi);
+            return c.FT_Vector{ .x = @intFromFloat(pixel_size * 0.6), .y = 0 };
+        }
 
-        // Use FT_LOAD_RENDER with antialiasing
         try intToError(c.FT_Load_Glyph(face, glyph_index, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_NORMAL));
         try intToError(c.FT_Render_Glyph(face.*.glyph, c.FT_RENDER_MODE_NORMAL));
 
         const bitmap = &face.*.glyph.*.bitmap;
+        if (bitmap.*.width == 0 or bitmap.*.rows == 0) {
+            std.log.debug("Empty bitmap for fallback glyph U+{x:0>4}", .{charcode});
+            const pixel_size = getPixelSize(self.pattern, self.dpi);
+            return c.FT_Vector{ .x = @intFromFloat(pixel_size * 0.6), .y = 0 };
+        }
+
         var ginfo = c.xcb_render_glyphinfo_t{
             .x = @intCast(-face.*.glyph.*.bitmap_left),
             .y = @intCast(face.*.glyph.*.bitmap_top),
@@ -1014,14 +1056,24 @@ pub const XRenderFont = struct {
         @memset(tmpbitmap, 0);
 
         for (0..@as(usize, @intCast(ginfo.height))) |y| {
-            @memcpy(
-                tmpbitmap[y * @as(usize, @intCast(stride)) ..][0..@as(usize, @intCast(ginfo.width))],
-                bitmap.*.buffer[@as(usize, @intCast(y * ginfo.width))..][0..@as(usize, @intCast(ginfo.width))],
-            );
+            if (bitmap.*.buffer) |buf| {
+                @memcpy(
+                    tmpbitmap[y * @as(usize, @intCast(stride)) ..][0..@as(usize, @intCast(ginfo.width))],
+                    buf[@as(usize, @intCast(y * bitmap.*.width))..][0..@as(usize, @intCast(ginfo.width))],
+                );
+            }
         }
 
-        _ = c.xcb_render_add_glyphs_checked(self.conn, gs, 1, &gid, &ginfo, stride * ginfo.height, tmpbitmap.ptr);
+        const cookie = c.xcb_render_add_glyphs_checked(self.conn, gs, 1, &gid, &ginfo, stride * ginfo.height, tmpbitmap.ptr);
+        if (c.xcb_request_check(self.conn, cookie)) |err| {
+            std.log.err("Failed to add fallback glyph U+{x:0>4}: {}", .{ charcode, err.*.error_code });
+            return error.PictureCreationFailed;
+        }
         _ = c.xcb_flush(self.conn);
+
+        // std.log.debug("Loaded fallback glyph U+{x:0>4}: width={}, height={}, x_off={}, y_off={}", .{
+        //     charcode, ginfo.width, ginfo.height, ginfo.x_off, ginfo.y_off,
+        // });
 
         return glyph_advance;
     }

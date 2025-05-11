@@ -3,33 +3,33 @@ const util = @import("util.zig");
 
 const assert = std.debug.assert;
 
-pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make way to put enum here
+pub fn IntegerBitSet(comptime IndexT: type) type {
+    const size = (@typeInfo(IndexT).@"enum".fields.len);
+
     comptime {
-        if (@typeInfo(IndexT) == .@"enum") {
-            const max_index = (@as(u64, 1) << @bitSizeOf(IndexT)) - 1; //idk how to do it right :)
-            if (size > max_index) {
-                @compileError("IndexT is too small to represent all indices for size=" ++ std.fmt.comptimePrint("{}", .{size}));
-            }
-        } else {
-            const max_index = (@as(u64, 1) << @bitSizeOf(IndexT)) - 1;
-            if (size > max_index) {
-                @compileError("IndexT is too small to represent all indices for size=" ++ std.fmt.comptimePrint("{}", .{size}));
-            }
+        // Determine the bit size of IndexT's backing type
+        const index_bits =
+            @bitSizeOf(@typeInfo(IndexT).@"enum".tag_type);
+
+        // Validate that size doesn't exceed the maximum index representable by IndexT
+        const max_index = (@as(u64, 1) << index_bits) - 1;
+        if (size > max_index) {
+            @compileError("IndexT is too small to represent all indices for size=" ++
+                std.fmt.comptimePrint("{}", .{size}));
         }
     }
 
     return packed struct {
         const Self = @This();
 
-        /// number elements in bit cluster
+        /// Number of elements in bit cluster
         pub const bit_length: usize = size;
 
-        /// type integer for keep bitmask
+        /// Type for the bitmask
         pub const MaskInt = std.meta.Int(.unsigned, size);
 
-        /// type for operations
-        pub const ShiftInt = std.math.Log2Int(MaskInt);
-
+        /// Type for shift operations, ensuring it can handle IndexT's range
+        pub const ShiftInt = std.meta.Int(.unsigned, std.math.log2_int_ceil(usize, size));
         /// The bit mask, as a single integer
         mask: MaskInt,
 
@@ -48,10 +48,8 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
             _ = self;
             return bit_length;
         }
-        // const indX = if (@typeInfo(IndexT) == .@"enum") @intFromEnum(IndexT) orelse @as(usize, @intCast(IndexT));
 
-        /// Returns true if the bit at the specified index
-        /// is present in the set, false otherwise.
+        /// Returns true if the bit at the specified index is present in the set, false otherwise.
         pub fn isSet(self: Self, index: IndexT) bool {
             if (comptime util.isDebug) {
                 assert(@as(usize, @intFromEnum(index)) < bit_length);
@@ -64,8 +62,7 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
             return @popCount(self.mask);
         }
 
-        /// Changes the value of the specified bit of the bit
-        /// set to match the passed boolean.
+        /// Changes the value of the specified bit of the bit set to match the passed boolean.
         pub fn setValue(self: *Self, index: IndexT, value: bool) void {
             if (comptime util.isDebug) {
                 assert(@as(usize, @intFromEnum(index)) < bit_length);
@@ -85,8 +82,8 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
 
             self.mask |= maskBit(index);
         }
-        /// Changes the value of all bits in the specified range to
-        /// match the passed boolean.
+
+        /// Changes the value of all bits in the specified range to match the passed boolean.
         pub fn setRangeValue(self: *Self, start: IndexT, end: IndexT, value: bool) void {
             if (comptime util.isDebug) {
                 assert(@as(usize, @intFromEnum(end)) <= bit_length);
@@ -127,39 +124,35 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
             }
             self.mask ^= maskBit(index);
         }
-        /// Flips a specific bit in the bit set
+
+        /// Flips all bits in this bit set which are present in the toggles bit set.
         pub fn toggleSet(self: *Self, toggles: Self) void {
             self.mask ^= toggles.mask;
         }
 
-        /// Flips all bits in this bit set which are present
-        /// in the toggles bit set.
+        /// Flips all bits in this bit set
         pub fn toggleAll(self: *Self) void {
             self.mask = ~self.mask;
         }
 
-        /// Performs a union of two bit sets, and stores the
-        /// result in the first one.  Bits in the result are
-        /// set if the corresponding bits were set in either input.
+        /// Performs a union of two bit sets, and stores the result in the first one.
         pub fn setUnion(self: *Self, other: Self) void {
             self.mask |= other.mask;
         }
 
-        /// Performs an intersection of two bit sets, and stores
-        /// the result in the first one.  Bits in the result are
-        /// set if the corresponding bits were set in both inputs.
+        /// Performs an intersection of two bit sets, and stores the result in the first one.
         pub fn setIntersection(self: *Self, other: Self) void {
             self.mask &= other.mask;
         }
 
-        /// Finds the index of the first set bit.
-        /// If no bits are set, returns null.
+        /// Finds the index of the first set bit. If no bits are set, returns null.
         pub fn findFirstSet(self: Self) ?IndexT {
             const mask = self.mask;
             if (mask == 0) return null;
             return @enumFromInt(@ctz(mask));
         }
 
+        /// Toggles and returns the index of the first set bit. If no bits are set, returns null.
         pub fn toggleFirstSet(self: *Self) ?IndexT {
             const mask = self.mask;
             if (mask == 0) return null;
@@ -168,62 +161,50 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
             return @enumFromInt(index);
         }
 
-        /// Returns true iff every corresponding bit in both
-        /// bit sets are the same.
+        /// Returns true if every corresponding bit in both bit sets are the same.
         pub fn eql(self: Self, other: Self) bool {
             return bit_length == 0 or self.mask == other.mask;
         }
 
-        /// Returns the complement bit sets. Bits in the result
-        /// are set if the corresponding bits were not set.
+        /// Returns true if the first bit set is a subset of the second one.
         pub fn subsetOf(self: Self, other: Self) bool {
             return self.intersectWith(other).eql(self);
         }
 
-        /// Returns true iff the first bit set is the superset
-        /// of the second one.
+        /// Returns true if the first bit set is a superset of the second one.
         pub fn supersetOf(self: Self, other: Self) bool {
             return other.subsetOf(self);
         }
 
-        /// Returns the complement bit sets. Bits in the result
-        /// are set if the corresponding bits were not set.
+        /// Returns the complement bit set. Bits in the result are set if the corresponding bits were not set.
         pub fn complement(self: Self) Self {
             var result = self;
             result.toggleAll();
             return result;
         }
 
-        /// Returns the union of two bit sets. Bits in the
-        /// result are set if the corresponding bits were set
-        /// in either input.
+        /// Returns the union of two bit sets.
         pub fn unionWith(self: Self, other: Self) Self {
             var result = self;
             result.setUnion(other);
             return result;
         }
 
-        /// Returns the intersection of two bit sets. Bits in
-        /// the result are set if the corresponding bits were
-        /// set in both inputs.
+        /// Returns the intersection of two bit sets.
         pub fn intersectWith(self: Self, other: Self) Self {
             var result = self;
             result.setIntersection(other);
             return result;
         }
 
-        /// Returns the xor of two bit sets. Bits in the
-        /// result are set if the corresponding bits were
-        /// not the same in both inputs.
+        /// Returns the xor of two bit sets.
         pub fn xorWith(self: Self, other: Self) Self {
             var result = self;
             result.toggleSet(other);
             return result;
         }
 
-        /// Returns the difference of two bit sets. Bits in
-        /// the result are set if set in the first but not
-        /// set in the second set.
+        /// Returns the difference of two bit sets.
         pub fn differenceWith(self: Self, other: Self) Self {
             var result = self;
             result.setIntersection(other.complement());
@@ -251,13 +232,13 @@ pub fn IntegerBitSet(comptime size: u16, comptime IndexT: type) type { // make w
                         .forward => {
                             const next_index = @ctz(self.bits_remain);
                             self.bits_remain &= self.bits_remain - 1;
-                            return @intCast(next_index);
+                            return @enumFromInt(next_index);
                         },
                         .reverse => {
                             const leading_zeroes = @clz(self.bits_remain);
                             const top_bit = (@bitSizeOf(MaskInt) - 1) - leading_zeroes;
                             self.bits_remain &= (@as(MaskInt, 1) << @as(ShiftInt, @intCast(top_bit))) - 1;
-                            return @intCast(top_bit);
+                            return @enumFromInt(top_bit);
                         },
                     }
                 }
@@ -278,3 +259,34 @@ pub const IteratorOptions = struct {
     pub const Kind = enum { set, unset };
     pub const Direction = enum { forward, reverse };
 };
+
+test "IntegerBitSet with enum IndexT" {
+    const TestFlags = enum(u4) {
+        FLAG_0,
+        FLAG_1,
+        FLAG_2,
+        FLAG_3,
+        FLAG_4,
+        FLAG_5,
+        FLAG_6,
+        FLAG_7,
+        FLAG_8,
+        FLAG_9,
+        FLAG_10,
+        FLAG_11,
+        FLAG_12,
+    };
+    const BitSet = IntegerBitSet(TestFlags);
+    var bitset = BitSet.initEmpty();
+
+    // Test setting and checking bits
+    bitset.set(.FLAG_12);
+    try std.testing.expect(bitset.isSet(.FLAG_12));
+    try std.testing.expect(!bitset.isSet(.FLAG_0));
+    try std.testing.expectEqual(1, bitset.count());
+
+    // Test range setting
+    bitset.setRangeValue(.FLAG_0, .FLAG_5, true);
+    try std.testing.expect(bitset.isSet(.FLAG_4));
+    try std.testing.expectEqual(6, bitset.count());
+}

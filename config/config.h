@@ -10,7 +10,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static const char font[] = "Iosevka Nerd Font Mono:pixelsize=12";
+static const char font[] = "DepartureMono Nerd Font:pixelsize=11";
 
 static const uint16_t borderpx = 2;
 
