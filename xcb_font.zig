@@ -812,7 +812,7 @@ pub const XRenderFont = struct {
         }
         defer std.c.free(geo_reply);
         const actual_depth = geo_reply.*.depth;
-        std.log.debug("Pixmap depth: {}", .{actual_depth});
+        // std.log.debug("Pixmap depth: {}", .{actual_depth});
 
         // Filter out non-printable codepoints and invalid Unicode
         var filtered_text = try self.allocator.alloc(u32, text.len);
@@ -917,7 +917,7 @@ pub const XRenderFont = struct {
         _ = c.xcb_render_create_glyph_set(self.conn, gs, fmt_a8.*.id);
 
         const pixel_size = getPixelSize(self.pattern, self.dpi);
-        std.log.debug("Using pixel_size for glyphs: {d}", .{pixel_size});
+        // std.log.debug("Using pixel_size for glyphs: {d}", .{pixel_size});
 
         for (0..text.length) |i| {
             const codepoint = text.str[i];

@@ -17,16 +17,6 @@ const TIOCGWINSZ = c.TIOCGWINSZ;
 
 pub const winsize = c.winsize;
 
-//=========================//* utf consts //=======================
-const UTF_INVALID = 0xFFFD;
-const ESC_BUF_SIZ = 128 * UTF_SIZ;
-const UTF_SIZ = 4;
-
-const ESC_ARG_SIZ = 16;
-const STR_BUF_SIZ = ESC_BUF_SIZ;
-const STR_ARG_SIZ = ESC_ARG_SIZ;
-
-//=========================//* utf consts //=======================
 //
 //  Terminal Emulator (Parent Process)
 //  Master: Used by the parent (terminal emulator) to send input to and receive output from the child.
@@ -191,6 +181,7 @@ pub const Pty = struct {
 
             _ = c.unsetenv("COLUMNS");
             _ = c.unsetenv("LINES");
+            _ = c.setenv("TERM", &c.termname, 1);
 
             // Execute the shell
             const shell = getShellPath();
@@ -291,7 +282,6 @@ pub fn main() !void {
         var alloc = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
         defer _ = alloc.deinit();
         const allocator = alloc.allocator();
-        _ = c.setlocale(c.LC_CTYPE, "");
         // _ = c.XSetLocaleModifiers("");
 
         //bench TODO:make another folder with benches
@@ -331,13 +321,9 @@ pub fn main() !void {
         // try runBenchmark("Completely different", large1, large3);
 
         var term = try xlib.XlibTerminal.init(allocator);
+        _ = c.setlocale(c.LC_CTYPE, "");
+
         defer term.deinit();
-        // while (true) {
-        //     try term.redraw2();
-        // }
-        // while (true) {
-        //     try term.testing();
-        // }
         try term.run();
     } else {
         const allocator = std.heap.c_allocator;

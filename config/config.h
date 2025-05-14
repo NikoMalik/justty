@@ -87,6 +87,7 @@ static const unsigned char rows = 24;//start rows when started app,can be dynami
 
 
 
+static const char termname[] = "xterm-256color";
 
 
 
