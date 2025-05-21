@@ -7,8 +7,21 @@ const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
 const data_structs = @import("datastructs.zig");
 const assert = std.debug.assert;
-const unicode = std.unicode.utf8ValidCodepoint;
+const unicode = std.unicode;
 const font = @import("xcb_font.zig");
+pub const vtiden: []const u8 = "\x1B[?6c"; // VT102 identification string
+pub const ascii_printable =
+    \\ !\"#$%&'()*+,-./0123456789:;<=>?
+    \\ @ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_
+    \\ `abcdefghijklmnopqrstuvwxyz{|}~
+;
+
+const utf_size = 4;
+const esc_buf_size = 128 * utf_size;
+const esc_arg_size = 16;
+const str_buf_size = esc_buf_size;
+const str_arg_size = esc_arg_size;
+
 //*root window - its This is the root window of the X11 display, covering the entire screen.
 // It is controlled by the window manager and serves as a parent for all other windows in the application.
 //It is not directly involved in rendering, but provides a coordinate system and context for other windows.
@@ -20,113 +33,69 @@ const font = @import("xcb_font.zig");
 
 //root_window *width propery and more*
 //└── main_window *text, cursor,visual8
-pub fn ATTRCMP(a: Glyph, b: Glyph) bool {
+//================================HELP_FUNCTIONS===================================//
+
+pub inline fn ATTRCMP(a: Glyph, b: Glyph) bool {
     return a.mode.eql(b.mode) and
         a.fg_index == b.fg_index and
         a.bg_index == b.bg_index;
 }
-pub inline fn safeCast(c_ulong_val: c_ulong) !i16 {
-    return if (c_ulong_val > @as(c_ulong, @intCast(std.math.maxInt(i16))))
-        error.Overflow
-    else if (c_ulong_val < @as(c_ulong, @intCast(std.math.minInt(i16))))
-        error.Underflow
-    else
-        @intCast(c_ulong_val);
+
+pub inline fn TIMEDIFF(t1: c.struct_timespec, t2: c.struct_timespec) c_long {
+    return (t1.tv_sec - t2.tv_sec) * 1000 + @divTrunc(t1.tv_nsec - t2.tv_nsec, 1_000_000);
 }
 
-pub inline fn safeLongToI16(value: c_long) !i16 {
-    return if (value > std.math.maxInt(i16))
-        error.Overflow
-    else if (value < std.math.minInt(i16))
-        error.Underflow
-    else
-        @intCast(value);
+inline fn DEFAULT(comptime T: type, value: T, def: T) T {
+    return if (value != 0) value else def;
 }
 
-pub const XcbError = error{
-    GeometryRequestFailed,
-    NullGeometryReply,
-};
+// =========================== Enumerations and Bitsets ===========================
 
-pub fn get_drawable_size(conn: *c.xcb_connection_t, drawable: c.xcb_drawable_t) !c.xcb_rectangle_t {
-    const cookie = c.xcb_get_geometry(conn, drawable);
-
-    var err: ?*c.xcb_generic_error_t = null;
-    const geom = c.xcb_get_geometry_reply(conn, cookie, &err);
-
-    if (err != null) {
-        std.log.err("XCB geometry error: {}", .{err.?.error_code});
-        return XcbError.GeometryRequestFailed;
-    }
-    defer std.c.free(geom);
-
-    if (geom == null) {
-        return XcbError.NullGeometryReply;
-    }
-
-    return c.xcb_rectangle_t{
-        .width = geom.?.*.width,
-        .height = geom.?.*.height,
-        .x = geom.?.*.x,
-        .y = geom.?.*.y,
-    };
-}
-const Key = packed struct(u64) {
-    key_sym: c.xcb_keysym_t,
-    mode: u32,
-};
-
-pub const masks = union(enum(u32)) {
-
-    // mainWinMode
-    pub const WINDOW_WM: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_BORDER_PIXEL | c.XCB_CW_BIT_GRAVITY | c.XCB_CW_COLORMAP;
-    pub const CHILD_EVENT_MASK: u32 = c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS | c.XCB_EVENT_MASK_BUTTON_RELEASE | c.XCB_EVENT_MASK_BUTTON_MOTION;
-
-    pub const WINDOW_CURSOR: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_CURSOR;
-};
-
-const elements = enum(u8) {
-    COPY_FROM_PARENT = c.XCB_COPY_FROM_PARENT,
-};
-
-const GLyphMode = data_structs.IntegerBitSet(13, Glyph_flags);
-
-const WinMode = data_structs.IntegerBitSet(19, WinModeFlags);
-
-const TermMode = data_structs.IntegerBitSet(7, TermModeFlags);
-
-const CursorMode = data_structs.IntegerBitSet(3, CursorFlags);
-
+// Attributes for a single character (Glyph)
 const Glyph_flags = enum(u4) {
-    ATTR_NULL = 0,
-    ATTR_BOLD = 1,
-    ATTR_FAINT = 2,
-    ATTR_ITALIC = 3,
-    ATTR_UNDERLINE = 4,
-    ATTR_BLINK = 5,
-    ATTR_REVERSE = 6,
-    ATTR_INVISIBLE = 7,
-    ATTR_STRUCK = 8,
-    ATTR_WRAP = 9,
-    ATTR_WIDE = 10,
-    ATTR_WDUMMY = 11,
-    ATTR_BOLD_FAINT = 12,
+    ATTR_NULL = 0, // No attributes
+    ATTR_BOLD = 1, // Bold text
+    ATTR_FAINT = 2, // Faint text
+    ATTR_ITALIC = 3, // Italic text
+    ATTR_UNDERLINE = 4, // Underlined text
+    ATTR_BLINK = 5, // Blinking text
+    ATTR_REVERSE = 6, // Reverse colors
+    ATTR_INVISIBLE = 7, // Invisible text
+    ATTR_STRUCK = 8, // Strikethrough text
+    ATTR_WRAP = 9, // Line wrap
+    ATTR_WIDE = 10, // Wide character
+    ATTR_WDUMMY = 11, // Dummy wide character
+    ATTR_BOLD_FAINT = 12, // Bold and faint combined
 };
 
-const CursorFlags = enum(u2) {
+// Bitset for Glyph attributes
+const GLyphMode = data_structs.IntegerBitSet(Glyph_flags);
+
+// Terminal mode flags
+const TermModeFlags = enum(u3) {
+    MODE_WRAP = 0, // Enable line wrapping
+    MODE_INSERT = 1, // Insert mode
+    MODE_ALTSCREEN = 2, // Use alternate screen buffer
+    MODE_CRLF = 3, // Carriage return + line feed
+    MODE_ECHO = 4, // Echo input to screen
+    MODE_PRINT = 5, // Print mode
+    MODE_UTF8 = 6, // UTF-8 encoding
+};
+
+const Esc_flags = enum(u3) {
+    ESC_START = 0,
+    ESC_CSI = 2,
+    ESC_STR = 3, // DCS, OSC, PM, APC */
+    ESC_ALTCHARSET = 4,
+    ESC_STR_END = 5, // a final string was encountered */
+    ESC_TEST = 6, // Enter in test mode */
+    ESC_UTF8 = 7,
+};
+
+const CursorFlags = enum(u3) {
     CURSOR_DEFAULT = 0,
     CURSOR_WRAPNEXT = 1,
     CURSOR_ORIGIN = 2,
-};
-
-const TermModeFlags = enum(u3) {
-    MODE_WRAP = 0,
-    MODE_INSERT = 1,
-    MODE_ALTSCREEN = 2,
-    MODE_CRLF = 3,
-    MODE_ECHO = 4,
-    MODE_PRINT = 5,
-    MODE_UTF8 = 6,
 };
 
 const WinModeFlags = enum(u5) {
@@ -151,11 +120,159 @@ const WinModeFlags = enum(u5) {
     MODE_MOUSE = 18,
 };
 
-pub const ascii_printable =
-    \\ !\"#$%&'()*+,-./0123456789:;<=>?
-    \\ @ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_
-    \\ `abcdefghijklmnopqrstuvwxyz{|}~
-;
+const WinMode = data_structs.IntegerBitSet(WinModeFlags);
+
+const CursorMode = data_structs.IntegerBitSet(CursorFlags);
+
+const EscMode = data_structs.IntegerBitSet(Esc_flags);
+
+// Bitset for terminal modes
+const TermMode = data_structs.IntegerBitSet(TermModeFlags);
+
+// const elements = enum(u8) {
+//     COPY_FROM_PARENT = c.XCB_COPY_FROM_PARENT,
+// };
+
+pub const masks = union(enum(u32)) {
+
+    // mainWinMode
+    pub const WINDOW_WM: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_BORDER_PIXEL | c.XCB_CW_BIT_GRAVITY | c.XCB_CW_COLORMAP;
+    pub const CHILD_EVENT_MASK: u32 = c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS | c.XCB_EVENT_MASK_BUTTON_RELEASE | c.XCB_EVENT_MASK_BUTTON_MOTION;
+
+    pub const WINDOW_CURSOR: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_CURSOR;
+};
+
+const Key = packed struct(u64) {
+    key_sym: c.xcb_keysym_t,
+    mode: u32,
+};
+
+/// CSI Escape sequence structs
+/// `ESC '[' [[ [<priv>] <arg> [;]] <mode> [<mode>]]`
+/// (Control Sequence Introducers)
+const CSIEscape = struct {
+    buf: [esc_buf_size]u8,
+    esc_len: usize,
+    priv: u8,
+    params: [esc_arg_size]u32,
+    narg: usize,
+    mode: [2]u8,
+
+    const Self = @This();
+
+    pub fn parse_esc(self: *Self, xterm: *XlibTerminal, data: []const u8) void {
+        for (data) |byte| {
+            if (byte == '\n') {
+                xterm.term.cursor.pos.x = 0;
+                if (xterm.term.cursor.pos.y < xterm.term.size_grid.rows - 1) {
+                    xterm.term.cursor.pos.y += 1;
+                } else {
+                    xterm.scrollUp(1);
+                }
+                xterm.term.set_dirt(xterm.term.cursor.pos.y, xterm.term.cursor.pos.y);
+                continue;
+            }
+
+            if (self.esc_len >= self.buf.len) {
+                std.log.warn("Escape sequence buffer overflow: {x}", .{self.buf[0..self.esc_len]});
+                xterm.term.esc_mode = EscMode.initEmpty();
+                self.esc_len = 0;
+                continue;
+            }
+
+            self.buf[self.esc_len] = byte;
+            self.esc_len += 1;
+
+            if (self.esc_len == 1 and byte == 0x1B) {
+                xterm.term.esc_mode.set(.ESC_START);
+                continue;
+            }
+
+            if (xterm.term.esc_mode.isSet(.ESC_START) and self.esc_len >= 2) {
+                switch (self.buf[1]) {
+                    '[' => xterm.term.esc_mode.set(.ESC_CSI),
+                    '(', ')' => xterm.term.esc_mode.set(.ESC_ALTCHARSET),
+                    ']', 'P', '^', '@' => xterm.term.esc_mode.set(.ESC_STR),
+                    else => {
+                        xterm.term.esc_mode = EscMode.initEmpty();
+                        self.esc_len = 0;
+                        continue;
+                    },
+                }
+            }
+
+            if (xterm.term.esc_mode.isSet(.ESC_CSI) and self.esc_len >= 2 and self.buf[1] == '[') {
+                const final_char_range_start: u8 = '@';
+                const final_char_range_end: u8 = '~';
+                if (self.esc_len > 2 and byte >= final_char_range_start and byte <= final_char_range_end) {
+                    // Remove or adjust this debug print if it's causing raw output
+                    // self.csidump();
+                    std.log.debug("Parsed CSI: mode={c}, params={any}, narg={d}, priv={d}", .{
+                        self.mode[0],
+                        self.params[0..self.narg],
+                        self.narg,
+                        self.priv,
+                    });
+                    self.narg = 0;
+                    self.priv = if (self.esc_len > 2 and self.buf[2] == '?') 1 else 0;
+                    self.mode[0] = byte;
+                    self.mode[1] = 0;
+
+                    // Parse parameters
+                    if (self.esc_len > 3) {
+                        const param_str = self.buf[2 + self.priv .. self.esc_len - 1];
+                        var start: usize = 0;
+                        while (start < param_str.len) {
+                            const remaining_len = @min(param_str.len - start, 16);
+                            const chunk = param_str[start .. start + remaining_len];
+                            var chunk_vec: @Vector(16, u8) = undefined;
+                            for (chunk, 0..) |cc, i| {
+                                chunk_vec[i] = cc;
+                            }
+
+                            const semicolon_vec: @Vector(16, u8) = @splat(';');
+                            const comparison = chunk_vec == semicolon_vec;
+                            const found_semicolon = @reduce(.Or, comparison);
+
+                            var end: usize = start + remaining_len;
+                            if (found_semicolon) {
+                                for (chunk, 0..) |cc, i| {
+                                    if (cc == ';') {
+                                        end = start + i;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (start < end and self.narg < self.params.len) {
+                                const num_str = param_str[start..end];
+                                self.params[self.narg] = std.fmt.parseInt(u32, num_str, 10) catch 0;
+                                self.narg += 1;
+                            }
+                            start = end + 1;
+                        }
+                    } else {
+                        self.params[self.narg] = 0;
+                        self.narg += 1;
+                    }
+
+                    xterm.csihandle(self); // Process the CSI sequence
+                    xterm.term.esc_mode = EscMode.initEmpty();
+                    self.esc_len = 0;
+                }
+            } else if (xterm.term.esc_mode.isSet(.ESC_STR) or xterm.term.esc_mode.isSet(.ESC_ALTCHARSET)) {
+                if (byte == 0x07 or byte == 0x1B) {
+                    xterm.term.esc_mode = EscMode.initEmpty();
+                    self.esc_len = 0;
+                }
+            } else if (self.esc_len > 32) {
+                std.log.warn("Incomplete escape sequence, resetting: {x}", .{self.buf[0..self.esc_len]});
+                xterm.term.esc_mode = EscMode.initEmpty();
+                self.esc_len = 0;
+            }
+        }
+    }
+};
 
 pub const VisualData = struct {
     visual: *c.xcb_visualtype_t,
@@ -250,6 +367,15 @@ pub const Glyph = struct {
     u: u32 = 0, //unicode  char
     fg_index: u9 = @as(u9, @intCast(c.defaultfg)), //foreground
     bg_index: u9 = @as(u9, @intCast(c.defaultbg)), //background
+
+    pub fn initEmpty() Glyph {
+        return .{
+            .u = ' ',
+            .fg_index = c.defaultfg,
+            .bg_index = c.defaultbg,
+            .mode = GLyphMode.initEmpty(),
+        };
+    }
 };
 
 const DirtySet = std.bit_set.ArrayBitSet(u16, c.MAX_ROWS);
@@ -262,33 +388,33 @@ const Term = struct {
     dirty: DirtySet, //Bitmask to keep track of “dirty” rows that need to be redrawn.
     line: [c.MAX_ROWS][c.MAX_COLS]Glyph, // Array of strings with fixed size MAX_ROWS
     alt: [c.MAX_ROWS][c.MAX_COLS]Glyph, // alt array(for example vim,htop) of strings with fixes size MAX_ROWS
-
+    csi_escape: CSIEscape,
+    esc_mode: EscMode, // status of esc
     //For an 80x24 character terminal with a Glyph size of 16 bytes, one screen takes ~30 KB.
     //Two screens - ~60 KB. can we use union for 60kb? mb not
     // cols,rows
     size_grid: Grid, // Grid size (cols, rows)
     cursor: TCursor, //cursor
     tabs: [c.MAX_COLS]u8,
+
     ocx: u16 = 0, // Previous cursor position X
     ocy: u16 = 0, // Previous cursor position Y
     top: u16 = 0, // Upper scroll limit
     bot: u16 = 0, // Lower scroll limit
-    esc: u16 = 0, // Status of ESC sequences
+    lastc: u32 = 0, //stores the last typed character in the terminal. It is required to process certain escape sequences, such as CSI REP
+    // esc: u16 = 0, // Status of ESC sequences
     charset: u16 = 0, // Current encoding
     icharset: u16 = 0, // Encoding index
     trantbl: [4]u8, // /* charset table translation */
     cursor_visible: bool, // Cursor visibility
 
     pub fn init(allocator: Allocator, cols: u16, rows: u16) !Term {
-        // const cols_u16 = @as(u16, @intCast(c.cols)); // u8
-        // const rows_u16 = @as(u16, @intCast(c.rows)); // u8
-
         var term: Term = .{
             .mode = TermMode.initEmpty(),
             .allocator = allocator,
             .dirty = DirtySet.initEmpty(),
-            .line = undefined, //later
-            .alt = undefined, //later
+            .line = undefined,
+            .alt = undefined,
             .size_grid = Grid{ .cols = cols, .rows = rows },
             .cursor = TCursor{
                 .attr = Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() },
@@ -296,11 +422,19 @@ const Term = struct {
                 .state = CursorMode.initEmpty(),
             },
             .tabs = undefined,
+            .csi_escape = CSIEscape{
+                .buf = undefined,
+                .esc_len = 0,
+                .priv = 0,
+                .params = [_]u32{0} ** esc_arg_size,
+                .narg = 0,
+                .mode = [_]u8{ 0, 0 },
+            },
+            .esc_mode = EscMode.initEmpty(),
             .ocx = 0,
             .ocy = 0,
             .top = 0,
             .bot = rows - 1,
-            .esc = 0,
             .charset = 0,
             .icharset = 0,
             .trantbl = [_]u8{0} ** 4,
@@ -314,7 +448,460 @@ const Term = struct {
             row.* = [_]Glyph{Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() }} ** c.MAX_COLS;
         }
         term.tabs = [_]u8{0} ** c.MAX_COLS;
+        term.mode.set(.MODE_WRAP);
         return term;
+    }
+
+    inline fn csi_ich(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        for (self.cursor.pos.x + n..self.size_grid.cols) |x| {
+            screen[self.cursor.pos.y][x - n] = screen[self.cursor.pos.y][x];
+        }
+        for (self.cursor.pos.x..self.cursor.pos.x + n) |x| {
+            screen[self.cursor.pos.y][x] = Glyph.initEmpty();
+        }
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    inline fn csi_cuu(self: *Term, params: []u32) void { // Cursor Up
+        const n = DEFAULT(u32, params[0], 1);
+        const old_y = self.cursor.pos.y;
+        const new_y = if (self.cursor.pos.y > n) self.cursor.pos.y - n else 0;
+        self.cursor.pos.y = @intCast(new_y);
+        self.set_dirt(old_y, old_y);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    inline fn csi_cub(self: *Term, params: []u32) void { // CUrsor Backward
+        const n = DEFAULT(u32, params[0], 1);
+        const new_x = if (self.cursor.pos.x > n) self.cursor.pos.x - n else 0;
+        self.cursor.pos.x = @intCast(new_x);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    inline fn csi_cud(self: *Term, params: []u32) void { // Cursor Down
+        const n = DEFAULT(u32, params[0], 1);
+        const old_y = self.cursor.pos.y;
+        const new_y = @min(self.cursor.pos.y + n, self.size_grid.rows - 1);
+        self.cursor.pos.y = new_y;
+        self.set_dirt(old_y, old_y);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    fn csi_mc(self: *Term, params: []u32, xterm: *XlibTerminal) void {
+        switch (params[0]) {
+            0 => xterm.tdump(),
+            1 => xterm.tdumpline(self.cursor.pos.y),
+            2 => xterm.tdumpsel(),
+            4 => self.mode.unset(.MODE_PRINT),
+            5 => self.mode.set(.MODE_PRINT),
+            else => std.log.warn("Unknown MC parameter: {}", .{params[0]}),
+        }
+    }
+
+    fn csi_da(_: *Term, params: []u32, xterm: *XlibTerminal) void {
+        if (params[0] == 0) {
+            xterm.ttywrite(vtiden, vtiden.len, 0);
+        }
+    }
+
+    fn csi_cuf(self: *Term, params: []u32) void { // Cursor Forward
+        const n = DEFAULT(u32, params[0], 1);
+        const new_x = @min(self.cursor.pos.x + n, self.size_grid.cols - 1);
+        self.cursor.pos.x = new_x;
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    fn csi_cnl(self: *Term, params: []u32) void { // Cursor Nextline
+        const n = DEFAULT(u32, params[0], 1);
+        const old_y = self.cursor.pos.y;
+        self.cursor.pos.x = 0;
+        self.cursor.pos.y = @min(self.cursor.pos.y + n, self.size_grid.rows - 1);
+        self.set_dirt(old_y, self.cursor.pos.y);
+    }
+
+    fn csi_cpl(self: *Term, params: []u32) void { // Cursor Previous Line
+        const n = DEFAULT(u32, params[0], 1);
+        const old_y = self.cursor.pos.y;
+        self.cursor.pos.x = 0;
+        self.cursor.pos.y = if (self.cursor.pos.y > n) self.cursor.pos.y - @min(@as(u16, @intCast(n)), self.cursor.pos.y) else 0;
+        self.set_dirt(self.cursor.pos.y, old_y);
+    }
+
+    fn csi_tbc(self: *Term, params: []u32) void {
+        switch (params[0]) {
+            0 => self.tabs[self.cursor.pos.x] = 0,
+            3 => @memset(&self.tabs, 0),
+            else => std.log.warn("Unknown TBC parameter: {}", .{params[0]}),
+        }
+    }
+
+    fn csi_cha(self: *Term, params: []u32) void { // Cursor Character Absolute
+        const n = DEFAULT(u32, params[0], 1);
+        const new_x = @min(n - 1, self.size_grid.cols - 1);
+        self.cursor.pos.x = @intCast(new_x);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    fn csi_cup(self: *Term, params: []u32) void {
+        const row = DEFAULT(u32, params[0], 1);
+        const col = DEFAULT(u32, params[1], 1);
+        const new_y = @min(@as(u16, @intCast(row - 1)), self.size_grid.rows - 1);
+        const new_x = @min(@as(u16, @intCast(col - 1)), self.size_grid.cols - 1);
+        const old_y = self.cursor.pos.y;
+        self.cursor.pos = Position{ .x = new_x, .y = new_y };
+        self.set_dirt(old_y, new_y);
+    }
+
+    fn csi_cht(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tputtab(@intCast(n));
+    }
+
+    fn csi_ed(self: *Term, params: []u32) void {
+        const n = params[0];
+        // const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        switch (n) {
+            0 => { // Clear below
+                self.tclearregion(self.cursor.pos.x, self.cursor.pos.y, self.size_grid.cols - 1, self.cursor.pos.y);
+                if (self.cursor.pos.y < self.size_grid.rows - 1) {
+                    self.tclearregion(0, self.cursor.pos.y + 1, self.size_grid.cols - 1, self.size_grid.rows - 1);
+                }
+            },
+            1 => { // Clear above
+                if (self.cursor.pos.y > 0) {
+                    self.tclearregion(0, 0, self.size_grid.cols - 1, self.cursor.pos.y - 1);
+                }
+                self.tclearregion(0, self.cursor.pos.y, self.cursor.pos.x, self.cursor.pos.y);
+            },
+            2 => { // Clear all
+                self.tclearregion(0, 0, self.size_grid.cols - 1, self.size_grid.rows - 1);
+            },
+            else => std.log.warn("Unknown ED parameter: {}", .{n}),
+        }
+    }
+
+    fn csi_el(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 0);
+        const y = self.cursor.pos.y;
+        switch (n) {
+            0 => self.tclearregion(self.cursor.pos.x, y, self.size_grid.cols - 1, y),
+            1 => self.tclearregion(0, y, self.cursor.pos.x, y),
+            2 => self.tclearregion(0, y, self.size_grid.cols - 1, y),
+            else => std.log.warn("Unknown EL parameter: {}", .{n}),
+        }
+    }
+
+    fn csi_su(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tscrollup(self.top, n);
+    }
+
+    fn csi_sd(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tscrolldown(self.top, n);
+    }
+
+    fn csi_il(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tinsertblankline(n);
+    }
+
+    fn csi_rm(self: *Term, params: []u32, narg: usize, priv: u8, winmode: *WinMode) void {
+        self.tsetmode(priv, 0, params, narg, winmode);
+    }
+
+    fn csi_dl(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tdeleteline(n);
+    }
+
+    fn csi_ech(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tclearregion(self.cursor.pos.x, self.cursor.pos.y, self.cursor.pos.x + @as(u16, @intCast(n)) - 1, self.cursor.pos.y);
+    }
+
+    fn csi_dch(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        self.tdeletechar(n);
+    }
+
+    fn csi_cbt(self: *Term, params: []u32) void {
+        const n = DEFAULT(i32, @intCast(params[0]), 1);
+        self.tputtab(-n);
+    }
+
+    fn csi_vpa(self: *Term, params: []u32) void {
+        const n = DEFAULT(u32, params[0], 1);
+        const new_y = @min(n - 1, self.size_grid.rows - 1);
+        const old_y = self.cursor.pos.y;
+        self.cursor.pos.y = @intCast(new_y);
+        self.set_dirt(old_y, new_y);
+    }
+
+    fn csi_sm(self: *Term, params: []u32, narg: usize, priv: u8, winmode: *WinMode) void {
+        self.tsetmode(priv, 1, params, narg, winmode);
+    }
+
+    fn csi_sgr(self: *Term, params: []u32, narg: usize) void {
+        self.handle_sgr(params[0..narg]);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    fn csi_dsr(self: *Term, params: []u32, xterm: *XlibTerminal) void {
+        var buf: [40]u8 = undefined;
+        switch (params[0]) {
+            5 => xterm.ttywrite("\x1B[0n", 4, 0),
+            6 => {
+                const res = std.fmt.bufPrint(&buf, "\x1B[{d};{d}R", .{ self.cursor.pos.y + 1, self.cursor.pos.x + 1 }) catch return;
+                xterm.ttywrite(res, res.len, 0);
+            },
+            else => std.log.warn("Unknown DSR parameter: {}", .{params[0]}),
+        }
+    }
+
+    fn csi_decstbm(self: *Term, params: []u32) void {
+        const top = DEFAULT(u32, params[0], 1);
+        const bot = DEFAULT(u32, params[1], self.size_grid.rows);
+        self.tsetscroll(@as(u16, @intCast(top)) - 1, @as(u16, @intCast(bot)) - 1);
+        self.tmoveto(0, 0);
+    }
+
+    // fn csi_decsc(self: *Term) void {
+    //     self.tcursor(CURSOR_SAVE);
+    // }
+
+    // fn csi_decrc(self: *Term) void {
+    //     self.tcursor(CURSOR_LOAD);
+    // }
+
+    // fn csi_decscusr(_: *Term, params: []u32, xterm: *XlibTerminal) bool {
+    //     return xterm.xsetcursor(params[0]);
+    // }
+
+    fn tinsertblank(self: *Term, n: u32) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        const dest = self.cursor.pos.x + n;
+        if (dest >= self.size_grid.cols) return;
+        util.move(
+            Glyph,
+            screen[self.cursor.pos.y][dest..self.size_grid.cols],
+            screen[self.cursor.pos.y][self.cursor.pos.x .. self.size_grid.cols - n],
+        );
+        for (self.cursor.pos.x..dest) |x| {
+            screen[self.cursor.pos.y][x] = Glyph.initEmpty();
+        }
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    fn tmoveto(self: *Term, x: u16, y: u16) void {
+        const new_x = @min(x, self.size_grid.cols - 1);
+        const new_y = @min(y, self.size_grid.rows - 1);
+        const old_y = self.cursor.pos.y;
+        self.cursor.pos = .{ .x = new_x, .y = new_y };
+        self.set_dirt(old_y, new_y);
+    }
+
+    fn tclearregion(self: *Term, x1: u16, y1: u16, x2: u16, y2: u16) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        for (y1..y2 + 1) |y| {
+            for (x1..x2 + 1) |x| {
+                screen[y][x] = Glyph.initEmpty();
+            }
+            self.set_dirt(@intCast(y), @intCast(y));
+        }
+    }
+
+    fn tputtab(self: *Term, n: i32) void { //need unsign and sign integers
+        var x = self.cursor.pos.x;
+        if (n > 0) {
+            var count: u32 = @intCast(n);
+            while (x < self.size_grid.cols and count > 0) : (count -= 1) {
+                x += 1;
+                while (x < self.size_grid.cols and self.tabs[x] == 0) {
+                    x += 1;
+                }
+            }
+        } else if (n < 0) {
+            var count: i32 = n;
+            while (x > 0 and count < 0) : (count += 1) {
+                x -= 1;
+                while (x > 0 and self.tabs[x] == 0) {
+                    x -= 1;
+                }
+            }
+        }
+        self.cursor.pos.x = @min(x, self.size_grid.cols - 1);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+    fn tscrollup(self: *Term, top: u16, n: u32) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        const shift = @min(n, self.size_grid.rows - top);
+        if (shift == 0) return;
+        util.move(
+            [c.MAX_COLS]Glyph,
+            screen[top .. self.size_grid.rows - shift],
+            screen[top + shift .. self.size_grid.rows],
+        );
+        for (self.size_grid.rows - shift..self.size_grid.rows) |y| {
+            @memset(&screen[y], Glyph.initEmpty());
+            self.set_dirt(@intCast(y), @intCast(y));
+        }
+        self.set_dirt(top, self.size_grid.rows - 1);
+    }
+
+    fn tscrolldown(self: *Term, top: u16, n: u32) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        const shift = @min(n, self.size_grid.rows - top);
+        if (shift == 0) return;
+        util.move(
+            [c.MAX_COLS]Glyph,
+            screen[top + shift .. self.size_grid.rows],
+            screen[top .. self.size_grid.rows - shift],
+        );
+        for (top..top + shift) |y| {
+            @memset(&screen[y], Glyph.initEmpty());
+            self.set_dirt(@intCast(y), @intCast(y));
+        }
+        self.set_dirt(top, self.size_grid.rows - 1);
+    }
+
+    fn tinsertblankline(self: *Term, n: u32) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        const shift = @min(n, self.size_grid.rows - self.cursor.pos.y);
+        if (shift == 0) return;
+        util.move(
+            [c.MAX_COLS]Glyph,
+            screen[self.cursor.pos.y + shift .. self.size_grid.rows],
+            screen[self.cursor.pos.y .. self.size_grid.rows - shift],
+        );
+        for (self.cursor.pos.y..self.cursor.pos.y + shift) |y| {
+            @memset(&screen[y], Glyph.initEmpty());
+            self.set_dirt(@intCast(y), @intCast(y));
+        }
+    }
+
+    fn tsetmode(self: *Term, priv: u8, set: u8, args: []u32, narg: usize, winmode: *WinMode) void {
+        for (args[0..narg]) |arg| {
+            if (priv != 0) {
+                switch (arg) {
+                    1 => if (set != 0) winmode.set(.MODE_APPCURSOR) else winmode.unset(.MODE_APPCURSOR),
+                    // 4 => if (set != 0) winmode.set(.MODE_INSERT) else winmode.unset(.MODE_INSERT),
+                    12 => if (set != 0) winmode.set(.MODE_BLINK) else winmode.unset(.MODE_BLINK),
+                    25 => self.cursor_visible = (set != 0),
+                    1049 => {
+                        if (set != 0) {
+                            self.mode.set(.MODE_ALTSCREEN);
+                            self.fulldirt();
+                        } else {
+                            self.mode.unset(.MODE_ALTSCREEN);
+                            self.fulldirt();
+                        }
+                    },
+                    else => std.log.debug("Unknown private mode: {}", .{arg}),
+                }
+            } else {
+                switch (arg) {
+                    4 => if (set != 0) self.mode.set(.MODE_WRAP) else self.mode.unset(.MODE_WRAP),
+                    else => std.log.debug("Unknown mode: {}", .{arg}),
+                }
+            }
+        }
+    }
+
+    fn tdeleteline(self: *Term, n: u32) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        const shift = @min(n, self.size_grid.rows - self.cursor.pos.y);
+        if (shift == 0) return;
+        util.move(
+            [c.MAX_COLS]Glyph,
+            screen[self.cursor.pos.y .. self.size_grid.rows - shift],
+            screen[self.cursor.pos.y + shift .. self.size_grid.rows],
+        );
+        for (self.size_grid.rows - shift..self.size_grid.rows) |y| {
+            @memset(&screen[y], Glyph.initEmpty());
+            self.set_dirt(@intCast(y), @intCast(y));
+        }
+    }
+
+    fn tdeletechar(self: *Term, n: u32) void {
+        const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
+        const dest = self.cursor.pos.x + n;
+        if (dest >= self.size_grid.cols) return;
+        util.move(
+            Glyph,
+
+            screen[self.cursor.pos.y][self.cursor.pos.x .. self.size_grid.cols - n],
+            screen[self.cursor.pos.y][dest..self.size_grid.cols],
+        );
+        for (self.size_grid.cols - n..self.size_grid.cols) |x| {
+            screen[self.cursor.pos.y][x] = Glyph.initEmpty();
+        }
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
+    }
+
+    fn tsetscroll(self: *Term, top: u16, bot: u16) void {
+        self.top = @min(top, self.size_grid.rows - 1);
+        self.bot = @min(bot, self.size_grid.rows - 1);
+        if (self.top > self.bot) {
+            self.top = 0;
+            self.bot = self.size_grid.rows - 1;
+        }
+    }
+
+    fn tcursor(self: *Term, mode: enum { CURSOR_SAVE, CURSOR_LOAD }) void {
+        if (mode == .CURSOR_SAVE) {
+            self.ocx = self.cursor.pos.x;
+            self.ocy = self.cursor.pos.y;
+        } else {
+            const old_y = self.cursor.pos.y;
+            self.cursor.pos.x = self.ocx;
+            self.cursor.pos.y = self.ocy;
+            self.set_dirt(old_y, self.ocy);
+        }
+    }
+
+    inline fn tputc(self: *Term, u: u32) void {
+        const x = self.cursor.pos.x;
+        const y = self.cursor.pos.y;
+        if (x < self.size_grid.cols and y < self.size_grid.rows) {
+            self.line[y][x] = Glyph{
+                .u = u,
+                .fg_index = self.cursor.attr.fg_index,
+                .bg_index = self.cursor.attr.bg_index,
+                .mode = self.cursor.attr.mode,
+            };
+            self.cursor.pos.x += 1;
+            if (self.cursor.pos.x >= self.size_grid.cols) {
+                self.cursor.pos.x = 0;
+                if (self.cursor.pos.y < self.size_grid.rows - 1) {
+                    self.cursor.pos.y += 1;
+                } else {
+                    self.tscrollup(self.top, 1);
+                }
+            }
+            self.set_dirt(y, y);
+        }
+        self.lastc = u;
+    }
+
+    fn csi_rep(self: *Term, params: []u32) void {
+        const n = @min(params[0], 1, 65535);
+        if (self.lastc != 0) {
+            var count = n;
+            while (count > 0) : (count -= 1) {
+                self.tputc(self.lastc);
+            }
+        }
+    }
+
+    inline fn insertblank(self: *Term, n: u16) void {
+        const d = self.cursor.pos.x + n;
+        const s = self.cursor.pos.x;
+        self.line = self.line[self.cursor.pos.x];
+        util.move([c.MAX_COLS]Glyph, &self.line[d], &self.line[s]);
+        self.set_dirt(self.cursor.pos.y, self.cursor.pos.y);
     }
 
     inline fn handle_esc_sequence(self: *Term, sequence: []const u8) void {
@@ -347,26 +934,46 @@ const Term = struct {
         self.mode.toggle(.MODE_ALTSCREEN);
         self.fulldirt();
     }
-
     fn resize(self: *Term, col: u16, rows: u16) !void {
         const new_cols = @max(2, @min(col, c.MAX_COLS));
         const new_rows = @max(2, @min(rows, c.MAX_ROWS));
 
         if (col < 2 or rows < 2) {
-            if (comptime util.isDebug) {
-                std.log.warn("Terminal size too small: requested cols={}, rows={}; clamping to cols={}, rows={}", .{ col, rows, new_cols, new_rows });
-            }
+            std.log.warn("Terminal size too small: requested cols={}, rows={}; clamping to cols={}, rows={}", .{ col, rows, new_cols, new_rows });
         }
 
         if (self.size_grid.cols == new_cols and self.size_grid.rows == new_rows) return;
 
+        var new_line: [c.MAX_ROWS][c.MAX_COLS]Glyph = undefined;
+        var new_alt: [c.MAX_ROWS][c.MAX_COLS]Glyph = undefined;
+
+        for (&new_line) |*row| {
+            row.* = [_]Glyph{Glyph.initEmpty()} ** c.MAX_COLS;
+        }
+        for (&new_alt) |*row| {
+            row.* = [_]Glyph{Glyph.initEmpty()} ** c.MAX_COLS;
+        }
+
+        const copy_rows = @min(self.size_grid.rows, new_rows);
+        const copy_cols = @min(self.size_grid.cols, new_cols);
+        for (0..copy_rows) |y| {
+            for (0..copy_cols) |x| {
+                new_line[y][x] = self.line[y][x];
+                new_alt[y][x] = self.alt[y][x];
+            }
+        }
+
+        self.line = new_line;
+        self.alt = new_alt;
         self.size_grid.cols = new_cols;
         self.size_grid.rows = new_rows;
-
         self.cursor.pos.x = @min(self.cursor.pos.x, new_cols - 1);
         self.cursor.pos.y = @min(self.cursor.pos.y, new_rows - 1);
+        self.top = 0;
+        self.bot = new_rows - 1;
 
-        self.dirty.setRangeValue(.{ .start = 0, .end = new_rows }, true);
+        self.fulldirt();
+        std.log.debug("Resized terminal: cols={}, rows={}", .{ new_cols, new_rows });
     }
     fn setdirtattr(self: *Term, attr: Glyph_flags) void {
         var i: u32 = 0;
@@ -410,36 +1017,58 @@ const Term = struct {
         return i;
     }
 
-    fn parse_esc(self: *Term, data: []const u8) void {
-        for (data) |byte| {
-            switch (self.esc) {
+    pub fn handle_sgr(self: *Term, params: []u32) void {
+        var i: usize = 0;
+        while (i < params.len) {
+            const n = params[i];
+            switch (n) {
                 0 => {
-                    if (byte == 0x1B) self.esc = 1;
+                    self.cursor.attr = Glyph{
+                        .u = ' ',
+                        .fg_index = c.defaultfg,
+                        .bg_index = c.defaultbg,
+                        .mode = GLyphMode.initEmpty(),
+                    };
                 },
-                1 => {
-                    if (byte == '[') self.esc = 2 else self.esc = 0;
+                1 => self.cursor.attr.mode.set(.ATTR_BOLD),
+                2 => self.cursor.attr.mode.set(.ATTR_FAINT),
+                3 => self.cursor.attr.mode.set(.ATTR_ITALIC),
+                4 => self.cursor.attr.mode.set(.ATTR_UNDERLINE),
+                5 => self.cursor.attr.mode.set(.ATTR_BLINK),
+                7 => self.cursor.attr.mode.set(.ATTR_REVERSE),
+                8 => self.cursor.attr.mode.set(.ATTR_INVISIBLE),
+                9 => self.cursor.attr.mode.set(.ATTR_STRUCK),
+                22 => {
+                    self.cursor.attr.mode.unset(.ATTR_BOLD);
+                    self.cursor.attr.mode.unset(.ATTR_FAINT);
                 },
-                2 => {
-                    switch (byte) {
-                        'J' => {
-                            const screen = if (self.mode.isSet((TermModeFlags.MODE_ALTSCREEN))) &self.alt else &self.line;
-                            for (screen[0..self.size_grid.rows]) |*row| {
-                                for (row[0..self.size_grid.cols]) |*glyph| {
-                                    glyph.* = Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() };
-                                }
-                            }
-                            self.dirty.setRangeValue(.{ .start = 0, .end = self.size_grid.rows }, true);
-                            self.esc = 0;
-                        },
-                        'H' => {
-                            self.cursor.pos = Position{ .x = 0, .y = 0 };
-                            self.esc = 0;
-                        },
-                        else => self.esc = 0,
+                23 => self.cursor.attr.mode.unset(.ATTR_ITALIC),
+                24 => self.cursor.attr.mode.unset(.ATTR_UNDERLINE),
+                25 => self.cursor.attr.mode.unset(.ATTR_BLINK),
+                27 => self.cursor.attr.mode.unset(.ATTR_REVERSE),
+                28 => self.cursor.attr.mode.unset(.ATTR_INVISIBLE),
+                29 => self.cursor.attr.mode.unset(.ATTR_STRUCK),
+                30...37 => self.cursor.attr.fg_index = @intCast(n - 30),
+                40...47 => self.cursor.attr.bg_index = @intCast(n - 40),
+                90...97 => self.cursor.attr.fg_index = @intCast((n - 90) + 8),
+                100...107 => self.cursor.attr.bg_index = @intCast((n - 100) + 8),
+                38, 48 => {
+                    if (i + 2 < params.len and params[i + 1] == 5) {
+                        if (n == 38) {
+                            self.cursor.attr.fg_index = @intCast(params[i + 2]);
+                        } else {
+                            self.cursor.attr.bg_index = @intCast(params[i + 2]);
+                        }
+                        i += 2;
+                    } else {
+                        std.log.debug("Unsupported extended color code: {}", .{n});
                     }
                 },
-                else => self.esc = 0,
+                39 => self.cursor.attr.fg_index = c.defaultfg,
+                49 => self.cursor.attr.bg_index = c.defaultbg,
+                else => std.log.debug("Unhandled SGR code: {}", .{n}),
             }
+            i += 1;
         }
     }
 };
@@ -459,18 +1088,6 @@ const TCursor = struct {
     attr: Glyph, //current char attrs
     pos: Position, // pos.x and pos.y for cursor position
     state: CursorMode,
-
-    // pub fn selected(self: *TCursor, x: u16, y: u16) bool {
-    //     if (self.state.isSet(.CURSOR_DEFAULT) or self.pos.y == Selection.no_sel or sel.alt != term.mode.get(.Altscreen))
-    //         return false;
-
-    //     if (sel.type == .Rectangular)
-    //         return sel.nb.y <= y and y <= sel.ne.y;
-
-    //     return (sel.nb.y <= y and y <= sel.ne.y) //
-    //     and (y != sel.nb.y or x >= sel.nb.x) //
-    //     and (y != sel.ne.y or x <= sel.ne.x);
-    // }
 };
 
 pub const Arg = union {
@@ -503,12 +1120,50 @@ const Color = packed struct(u96) {
     color: RenderColor,
 };
 
-pub inline fn TIMEDIFF(t1: c.struct_timespec, t2: c.struct_timespec) c_long {
-    return (t1.tv_sec - t2.tv_sec) * 1000 + @divTrunc(t1.tv_nsec - t2.tv_nsec, 1_000_000);
+//TODO:function for epoll events with getting fd from conn,MAKE ALL XCB CALLS CLEAR,MEMORY LEAKS NOW,CACHE atoms,change doc about windows
+// esc commansd \e[2J to clear the screen, \e[H to move the cursor).
+// ring buffer and event loop for pty read
+
+//===================================XCB_UTILS======================================================//
+pub fn get_root_window(conn: *c.xcb_connection_t) c.xcb_window_t {
+    if (!S.root_initialized) {
+        const screen = c.xcb_setup_roots_iterator(c.xcb_get_setup(conn)).data;
+        S.root_window = screen.*.root;
+        S.root_initialized = true;
+    }
+    return S.root_window;
 }
 
-inline fn get_colormap(conn: *c.xcb_connection_t) c.xcb_colormap_t {
-    return c.xcb_setup_roots_iterator(c.xcb_get_setup(conn)).data.*.default_colormap;
+pub fn get_drawable_size(conn: *c.xcb_connection_t, drawable: c.xcb_drawable_t) !c.xcb_rectangle_t {
+    const cookie = c.xcb_get_geometry(conn, drawable);
+
+    var err: ?*c.xcb_generic_error_t = null;
+    const geom = c.xcb_get_geometry_reply(conn, cookie, &err);
+
+    if (err != null) {
+        std.log.err("XCB geometry error: {}", .{err.?.error_code});
+        return error.GeometryRequestFailed;
+    }
+    defer std.c.free(geom);
+
+    if (geom == null) {
+        return error.NullGeometryReply;
+    }
+
+    return c.xcb_rectangle_t{
+        .width = geom.?.*.width,
+        .height = geom.?.*.height,
+        .x = geom.?.*.x,
+        .y = geom.?.*.y,
+    };
+}
+
+pub fn get_main_window(conn: *c.xcb_connection_t) c.xcb_window_t {
+    if (!S.main_initialized) {
+        S.main_window_id = c.xcb_generate_id(conn);
+        S.main_initialized = true;
+    }
+    return S.main_window_id;
 }
 
 pub inline fn create_gc(
@@ -523,66 +1178,30 @@ pub inline fn create_gc(
         out_gc = c.xcb_generate_id(conn);
     }
 
-    // Create the GC, check for errors
-    if (comptime util.isDebug) {
-        const create_cookie = c.xcb_create_gc_checked(conn, out_gc, win, 0, null);
-        XlibTerminal.testCookie(
-            create_cookie,
-            conn,
-            "cannot create gc in create_gc",
-        );
-
-        const value_mask: u32 = c.XCB_GC_FOREGROUND | c.XCB_GC_BACKGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-        const values: [3]u32 = .{
-            fg | 0xff000000,
-            bg | 0xff000000,
-            0,
-        };
-        _ = c.xcb_change_gc(conn, out_gc, value_mask, &values);
-
-        return out_gc;
-    } else {
-        _ = c.xcb_create_gc(
-            conn,
-            out_gc,
-            win,
-            0,
-            null,
-        );
-
-        const value_mask: u32 = c.XCB_GC_FOREGROUND | c.XCB_GC_BACKGROUND | c.XCB_GRAPHICS_EXPOSURE;
-        const values: [3]u32 = .{
-            fg | 0xff000000,
-            bg | 0xff000000,
-            0,
-        };
-        _ = c.xcb_change_gc(conn, out_gc, value_mask, &values);
-
-        return out_gc;
-    }
-}
-
-pub inline fn set_cardinal_property(
-    conn: *c.xcb_connection_t,
-    prop_name: []const u8,
-    value: u32,
-) void {
-    const prop = get_atom(conn, prop_name);
-    _ = c.xcb_change_property(
+    _ = c.xcb_create_gc(
         conn,
-        c.XCB_PROP_MODE_REPLACE,
-        get_main_window(conn),
-        prop,
-        c.XCB_ATOM_CARDINAL,
-        32,
-        1,
-        &value,
+        out_gc,
+        win,
+        0,
+        null,
     );
+
+    const value_mask: u32 = c.XCB_GC_FOREGROUND | c.XCB_GC_BACKGROUND | c.XCB_GRAPHICS_EXPOSURE;
+    const values: [3]u32 = .{
+        fg | 0xff000000,
+        bg | 0xff000000,
+        0,
+    };
+    _ = c.xcb_change_gc(conn, out_gc, value_mask, &values);
+
+    return out_gc;
 }
 
-//TODO:function for epoll events with getting fd from conn,MAKE ALL XCB CALLS CLEAR,MEMORY LEAKS NOW,CACHE atoms,change doc about windows
-// esc commansd \e[2J to clear the screen, \e[H to move the cursor).
-// ring buffer and event loop for pty read
+inline fn get_colormap(
+    conn: *c.xcb_connection_t,
+) c.xcb_colormap_t {
+    return c.xcb_setup_roots_iterator(c.xcb_get_setup(conn)).data.*.default_colormap;
+}
 
 pub inline fn get_geometry_reply(xc: *c.xcb_connection_t, cookie: c.xcb_get_geometry_cookie_t) !TermWindow {
     const reply = c.xcb_get_geometry_reply(xc, cookie, null) orelse {
@@ -605,6 +1224,24 @@ pub inline fn get_geometry(xc: *c.xcb_connection_t, f: Font) !TermWindow {
     geo.win_size.height -= geo.win_size.height % f.size.height;
 
     return geo;
+}
+
+pub inline fn set_cardinal_property(
+    conn: *c.xcb_connection_t,
+    prop_name: []const u8,
+    value: u32,
+) void {
+    const prop = get_atom(conn, prop_name);
+    _ = c.xcb_change_property(
+        conn,
+        c.XCB_PROP_MODE_REPLACE,
+        get_main_window(conn),
+        prop,
+        c.XCB_ATOM_CARDINAL,
+        32,
+        1,
+        &value,
+    );
 }
 
 // Resize window and its subwindows
@@ -656,21 +1293,33 @@ inline fn set_icon_name(xc: *c.xcb_connection_t, win: c.xcb_window_t, name: []co
     );
 }
 
-pub fn get_root_window(conn: *c.xcb_connection_t) c.xcb_window_t {
-    if (!S.root_initialized) {
-        const screen = c.xcb_setup_roots_iterator(c.xcb_get_setup(conn)).data;
-        S.root_window = screen.*.root;
-        S.root_initialized = true;
-    }
-    return S.root_window;
-}
-
-pub fn get_main_window(conn: *c.xcb_connection_t) c.xcb_window_t {
-    if (!S.main_initialized) {
-        S.main_window_id = c.xcb_generate_id(conn);
-        S.main_initialized = true;
-    }
-    return S.main_window_id;
+pub inline fn create_main_window(
+    conn: *c.xcb_connection_t,
+    root: c.xcb_window_t,
+    win: TermWindow,
+    values: []u32,
+    mask: u32,
+    visual: VisualData,
+) void {
+    const window = get_main_window(conn);
+    const cookie = c.xcb_create_window_checked(
+        conn,
+        c.XCB_COPY_FROM_PARENT,
+        window,
+        root,
+        0,
+        0,
+        @intCast(win.win_size.width),
+        @intCast(win.win_size.height),
+        0,
+        c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
+        visual.visual.*.visual_id,
+        mask,
+        values.ptr,
+    );
+    XlibTerminal.testCookie(cookie, conn, "cannot create main window");
+    S.main_window_id = window;
+    S.main_initialized = true;
 }
 
 pub inline fn get_atom(
@@ -695,11 +1344,6 @@ pub inline fn get_wm_del_win(
     _ = c.xcb_change_property(conn, c.XCB_PROP_MODE_REPLACE, get_main_window(conn), get_atom(conn, "WM_PROTOCOLS"), c.XCB_ATOM_ATOM, 32, 1, &a);
     return a;
 }
-
-// pub inline fn open_font(
-//     conn: *c.xcb_connection_t
-//     font_id: c.xcb_font_t,
-// ) bool {}
 
 pub inline fn set_utf8_prop(
     conn: *c.xcb_connection_t,
@@ -745,35 +1389,6 @@ pub inline fn set_property(
     );
 }
 
-pub inline fn create_main_window(
-    conn: *c.xcb_connection_t,
-    root: c.xcb_window_t,
-    win: TermWindow,
-    values: []u32,
-    mask: u32,
-    visual: VisualData,
-) void {
-    const window = get_main_window(conn);
-    const cookie = c.xcb_create_window_checked(
-        conn,
-        c.XCB_COPY_FROM_PARENT,
-        window,
-        root,
-        0,
-        0,
-        @intCast(win.win_size.width),
-        @intCast(win.win_size.height),
-        0,
-        c.XCB_WINDOW_CLASS_INPUT_OUTPUT,
-        visual.visual.*.visual_id,
-        mask,
-        values.ptr,
-    );
-    XlibTerminal.testCookie(cookie, conn, "cannot create main window");
-    S.main_window_id = window;
-    S.main_initialized = true;
-}
-
 pub inline fn get_cursor(
     conn: *c.xcb_connection_t,
     name: [*c]const u8,
@@ -816,7 +1431,6 @@ pub inline fn set_cursor( //free
     );
     return cursor_id;
 }
-
 pub inline fn get_cmap_from_winattr(
     conn: *c.xcb_connection_t,
     wac: c.xcb_get_window_attributes_cookie_t,
@@ -826,33 +1440,25 @@ pub inline fn get_cmap_from_winattr(
     std.c.free(reply);
     return cmap;
 }
-
-// pub inline fn set_fg(conn: *c.xcb_connection_t, gc: c.xcb_gcontext_t, p: u32) u32 {
-//     _ = c.xcb_change_gc(conn, gc, c.XCB_GC_FOREGROUND, &[_]u32{p});
-//     return p;
-// }
-
 pub inline fn set_fg(
     conn: *c.xcb_connection_t,
     gc: c.xcb_gcontext_t,
-    p: u32,
+    pixel: u32,
 ) void {
-    const cookie = c.xcb_change_gc_checked(conn, gc, c.XCB_GC_FOREGROUND, &[_]u32{p});
+    const values = [_]u32{ pixel, 0 };
+    const cookie = c.xcb_change_gc_checked(conn, gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
     XlibTerminal.testCookie(cookie, conn, "cannot set foreground color");
 }
 
 pub inline fn set_bg(
     conn: *c.xcb_connection_t,
     gc: c.xcb_gcontext_t,
-    p: u32,
+    pixel: u32,
 ) void {
-    const cookie = c.xcb_change_gc_checked(conn, gc, c.XCB_GC_BACKGROUND, &[_]u32{p});
+    const values = [_]u32{ pixel, 0 };
+    const cookie = c.xcb_change_gc_checked(conn, gc, c.XCB_GC_BACKGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
     XlibTerminal.testCookie(cookie, conn, "cannot set background color");
 }
-// pub inline fn set_bg(conn: *c.xcb_connection_t, gc: c.xcb_gcontext_t, p: u32) u32 {
-//     _ = c.xcb_change_gc(conn, gc, c.XCB_GC_BACKGROUND, &[_]u32{p});
-//     return p;
-// }
 
 pub inline fn get_rgb_pixel(
     conn: *c.xcb_connection_t,
@@ -953,6 +1559,8 @@ pub inline fn get_pixel(
     return @intCast(reply.pixel);
 }
 
+//==========================================================================================//
+
 // pub const struct_xcb_visualtype_t = extern struct {
 //     visual_id: xcb_visualid_t = @import("std").mem.zeroes(xcb_visualid_t),
 //     _class: u8 = @import("std").mem.zeroes(u8),
@@ -964,24 +1572,7 @@ pub inline fn get_pixel(
 //     pad0: [4]u8 = @import("std").mem.zeroes([4]u8),
 // };
 
-pub inline fn maskbase(m: u32) i16 {
-    if (m == 0) return 0;
-    var i: i16 = 0;
-    var mask = m;
-    while (mask & 1 == 0) {
-        mask >>= 1;
-        i += 1;
-    }
-    return i;
-}
-
-pub inline fn masklen(m: u64) i16 {
-    var y = (m >> 1) & 0x3333333333333333;
-    y = m - y - ((y >> 1) & 0x3333333333333333);
-    y = (y + (y >> 3)) & 0x0707070707070707;
-    return @as(i16, @intCast(y % 63));
-}
-
+//TODO: add it to xlibterminal to get_atom from cache instead of function call
 const Atoms = packed struct {
     xembed: c.xcb_atom_t,
     wmdeletewin: c.xcb_atom_t,
@@ -996,6 +1587,7 @@ pub const XlibTerminal = struct {
     //============================//=
     screen: *c.xcb_screen_t,
     pixmap: c.xcb_pixmap_t,
+    keysyms: *c.xcb_key_symbols_t,
     allocator: Allocator,
     pty: justty.Pty,
     pid: posix.pid_t,
@@ -1029,6 +1621,8 @@ pub const XlibTerminal = struct {
         // const screen = c.XDefaultScreen(display);
         const root = get_root_window(connection);
 
+        const keysyms = c.xcb_key_symbols_alloc(connection);
+
         const font_query = c.font;
         var xrender_font = try font.XRenderFont.init(connection, allocator, font_query[0..]);
         errdefer xrender_font.deinit();
@@ -1060,11 +1654,12 @@ pub const XlibTerminal = struct {
         if (border_px == 0) {
             border_px = 1;
         }
-
-        const win_width = 2 * border_px + cols_u16 * cw;
-        const win_height = 2 * border_px + rows_u16 * ch;
+        const width_check = try std.math.add(u16, try std.math.mul(u16, 2, border_px), try std.math.mul(u16, cols_u16, cw));
+        const height_check = try std.math.add(u16, try std.math.mul(u16, 2, border_px), try std.math.mul(u16, rows_u16, ch));
+        const win_width = width_check;
+        const win_height = height_check;
         if (win_width == 0 or win_height == 0 or win_width > 32767 or win_height > 32767) {
-            std.log.err("invalid width and height for winsizes: width={}, height={}", .{ win_width, win_height });
+            std.log.err("Invalid window size: width={d}, height={d}", .{ win_width, win_height });
             return error.InvalidWindowSize;
         }
         std.log.info("size windows: width={}, height={}", .{ win_width, win_height });
@@ -1222,9 +1817,178 @@ pub const XlibTerminal = struct {
             .pid = pid,
             .dc = dc,
             .win = win,
+            .keysyms = keysyms.?,
         };
     }
 
+    fn ttywrite(self: *Self, buf: []const u8, len: usize, flush: u8) void {
+        const write_len = @min(len, buf.len);
+        _ = self.pty.write(buf[0..write_len]) catch |err| {
+            std.log.err("ttywrite error: {}", .{err});
+        };
+        if (flush != 0) {
+            _ = c.xcb_flush(self.connection);
+        }
+    }
+
+    // The function traverses all rows and columns of the current screen (term.line).
+    // Each character (Glyph.u) is converted to UTF-8 using util.utf8Encode.
+    // Empty spaces at the end of lines are ignored to avoid unnecessary output.
+    // A \n is appended after each line.
+    // Data is buffered and sent to PTY via ttywrite.
+    // Logging is added for debugging.
+    fn tdump(self: *Self) void {
+        const cols = self.term.size_grid.cols;
+        const rows = self.term.size_grid.rows;
+        var buffer: [4096]u8 = undefined;
+        var buf_pos: usize = 0;
+
+        // Проходим по всем строкам терминала
+        for (self.term.line[0..rows], 0..) |line, y| {
+            const line_len = self.term.linelen(@intCast(y));
+            // Обрабатываем каждую строку
+            for (line[0..line_len], 0..) |glyph, x| {
+                // Пропускаем пустые символы в конце строки
+                if (glyph.u == ' ' and x == cols - 1) continue;
+                // Преобразуем кодовую точку Unicode в UTF-8
+                const utf8_len = util.utf8Encode(u32, glyph.u, buffer[buf_pos..]);
+                buf_pos += utf8_len;
+
+                // Если буфер заполнен, отправляем данные в PTY
+                if (buf_pos >= buffer.len - utf_size) {
+                    self.ttywrite(buffer[0..buf_pos], buf_pos, 0);
+                    buf_pos = 0;
+                }
+            }
+
+            // Добавляем перевод строки после каждой строки
+            if (buf_pos + 1 < buffer.len) {
+                buffer[buf_pos] = '\n';
+                buf_pos += 1;
+            }
+        }
+
+        // Отправляем оставшиеся данные
+        if (buf_pos > 0) {
+            self.ttywrite(buffer[0..buf_pos], buf_pos, 1);
+        }
+
+        std.log.debug("tdump: Dumped {} rows, {} cols", .{ rows, cols });
+    }
+
+    // The validity of the line index (y) is checked.
+    // Only the term.line[y] string is processed.
+    // Characters are converted to UTF-8, empty spaces are ignored.
+    // An \n is added to the end of the line.
+    // Data is sent via ttywrite.
+    fn tdumpline(self: *Self, y: u16) void {
+        if (y >= self.term.size_grid.rows) {
+            std.log.warn("tdumpline: Invalid row index {}", .{y});
+            return;
+        }
+
+        const cols = self.term.size_grid.cols;
+        var buffer: [4096]u8 = undefined;
+        var buf_pos: usize = 0;
+
+        for (self.term.line[y][0..cols]) |glyph| {
+            if (glyph.u == ' ') continue;
+
+            const utf8_len = util.utf8Encode(u32, glyph.u, buffer[buf_pos..]);
+            buf_pos += utf8_len;
+
+            if (buf_pos >= buffer.len - utf_size) {
+                self.ttywrite(buffer[0..buf_pos], buf_pos, 0);
+                buf_pos = 0;
+            }
+        }
+
+        if (buf_pos + 1 < buffer.len) {
+            buffer[buf_pos] = '\n';
+            buf_pos += 1;
+        }
+
+        if (buf_pos > 0) {
+            self.ttywrite(buffer[0..buf_pos], buf_pos, 1);
+        }
+
+        std.log.debug("tdumpline: Dumped row {}", .{y});
+    }
+    fn tdumpsel(_: *Self) void {
+        // check selected test
+        // const selected_text = self.primary orelse self.selection.clipcopy.clipboard orelse {
+        //     std.log.debug("tdumpsel: No selection available", .{});
+        //     return;
+        // };
+
+        // self.ttywrite(selected_text, selected_text.len, 1);
+
+        // std.log.debug("tdumpsel: Dumped selection of length {}", .{selected_text.len});
+    }
+    fn csihandle(self: *Self, csi: *CSIEscape) void {
+        const params = csi.params[0..csi.narg];
+        switch (csi.mode[0]) {
+            '@' => self.term.csi_ich(params),
+            'A' => self.term.csi_cuu(params),
+            'B', 'e' => self.term.csi_cud(params),
+            'i' => self.term.csi_mc(params, self),
+            'c' => self.term.csi_da(params, self),
+            'b' => self.term.csi_rep(params),
+            'C', 'a' => self.term.csi_cuf(params),
+            'D' => self.term.csi_cub(params),
+            'E' => self.term.csi_cnl(params),
+            'F' => self.term.csi_cpl(params),
+            'g' => self.term.csi_tbc(params),
+            'G', '`' => self.term.csi_cha(params),
+            'H', 'f' => self.term.csi_cup(params),
+            'I' => self.term.csi_cht(params),
+            'J' => self.term.csi_ed(params),
+            'K' => self.term.csi_el(params),
+            'S' => if (csi.priv == 0) self.term.csi_su(params) else std.log.warn("Unknown private SU sequence", .{}),
+            'T' => self.term.csi_sd(params),
+            'L' => self.term.csi_il(params),
+            'l' => self.term.csi_rm(params, csi.narg, csi.priv, &self.win.mode),
+            'M' => self.term.csi_dl(params),
+            'X' => self.term.csi_ech(params),
+            'P' => self.term.csi_dch(params),
+            'Z' => self.term.csi_cbt(params),
+            'd' => self.term.csi_vpa(params),
+            'h' => self.term.csi_sm(params, csi.narg, csi.priv, &self.win.mode),
+            'm' => {
+                if (csi.narg == 0 or (csi.narg == 1 and params[0] == 0)) {
+                    std.log.debug("Ignoring empty or reset SGR sequence", .{});
+                    return;
+                }
+                self.term.csi_sgr(params, csi.narg);
+            },
+            'n' => self.term.csi_dsr(params, self),
+            'r' => if (csi.priv == 0) self.term.csi_decstbm(params) else std.log.warn("Unknown private DECSTBM sequence", .{}),
+            // 's' => self.term.csi_decsc(),
+            // 'u' => if (csi.priv == 0) self.term.csi_decrc() else std.log.warn("Unknown private DECRC sequence", .{}),
+            // ' ' => {
+            //     if (csi.mode[1] == 'q') {
+            //         if (!self.term.csi_decscusr(params, self)) {
+            //             std.log.warn("Unknown DECSCUSR parameter: {}", .{params[0]});
+            //         }
+            //     } else {
+            //         std.log.warn("Unknown CSI space sequence: mode[1]={c}", .{csi.mode[1]});
+            //     }
+            // },
+            else => {
+                std.log.err("Unknown CSI sequence: mode[0]={c}", .{csi.mode[0]});
+            },
+        }
+    }
+
+    fn scrollUp(self: *Self, rows: u16) void {
+        const shift = @min(rows, self.term.size_grid.rows - 1);
+        if (shift == 0) return;
+        util.move([c.MAX_COLS]Glyph, self.term.line[0 .. self.term.size_grid.rows - shift], self.term.line[shift..self.term.size_grid.rows]);
+        for (self.term.size_grid.rows - shift..self.term.size_grid.rows) |i| {
+            @memset(&self.term.line[i], Glyph.initEmpty());
+        }
+        self.term.fulldirt();
+    }
     fn drawSimpleText(self: *Self, x: i16, y: i16, text: []const u8) !void {
         const font_id = c.xcb_generate_id(self.connection);
         _ = c.xcb_open_font(self.connection, font_id, "fixed".len, "fixed".ptr);
@@ -1261,56 +2025,96 @@ pub const XlibTerminal = struct {
         return numspecs;
     }
 
-    fn process_input(self: *XlibTerminal, data: []const u8) void {
-        for (data) |byte| {
-            if (self.term.esc > 0) {
-                self.term.parse_esc(&[_]u8{byte});
-            } else if (byte == 0x1B) { // ESC
-                self.term.esc = 1;
-            } else if (byte >= 32 and byte <= 126) { // Printable character
+    pub fn process_input(self: *XlibTerminal, data: []const u8) !void {
+        var pos: usize = 0;
+        const codepoint_count = util.countUtf8CodePoints(data);
+        const utf32_buffer = try self.allocator.alloc(u32, codepoint_count);
+        defer self.allocator.free(utf32_buffer);
+
+        while (pos < data.len) {
+            const valid_len = util.utf8_validate_pos(data[pos..]) orelse {
+                pos += 1;
+                continue;
+            };
+            const chunk = data[pos .. pos + valid_len];
+            pos += valid_len;
+
+            const codepoints = util.decode_utf8_to_utf32(chunk, utf32_buffer) catch |err| {
+                std.log.err("UTF-8 decode error: {}", .{err});
+                continue;
+            };
+
+            if (self.term.mode.isSet(.MODE_ECHO)) {
+                _ = self.pty.write(chunk) catch {};
+            }
+            for (codepoints) |codepoint| {
+                std.log.debug("Codepoint: {x}", .{codepoint});
                 const x = self.term.cursor.pos.x;
                 const y = self.term.cursor.pos.y;
-                if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
-                    self.term.line[y][x] = Glyph{
-                        .u = byte,
-                        .fg_index = c.defaultfg,
-                        .bg_index = c.defaultbg,
-                        .mode = GLyphMode.initEmpty(),
-                    };
-                    self.term.cursor.pos.x += 1;
-                    if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
+
+                if (codepoint == 0x1B) {
+                    self.term.esc_mode.set(.ESC_START);
+                    continue;
+                }
+
+                if (self.term.esc_mode.isSet(.ESC_START)) {
+                    var utf8_buf: [4]u8 = undefined;
+                    const len = util.utf8Encode(u32, codepoint, &utf8_buf);
+                    self.term.csi_escape.parse_esc(self, utf8_buf[0..len]);
+                    continue;
+                }
+                switch (codepoint) {
+                    '\n' => {
                         self.term.cursor.pos.x = 0;
-                        self.term.cursor.pos.y += 1;
-                        if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-                            // Scroll up
-                            for (0..self.term.size_grid.rows - 1) |i| {
-                                self.term.line[i] = self.term.line[i + 1];
-                            }
-                            self.term.line[self.term.size_grid.rows - 1] = [_]Glyph{Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() }} ** c.MAX_COLS;
-                            self.term.cursor.pos.y -= 1;
-                            // Mark all lines as dirty due to scrolling
-                            self.term.fulldirt();
+                        if (self.term.cursor.pos.y < self.term.size_grid.rows - 1) {
+                            self.term.cursor.pos.y += 1;
                         } else {
+                            self.scrollUp(1);
+                        }
+                        self.term.set_dirt(y, self.term.cursor.pos.y);
+                    },
+                    '\r' => {
+                        self.term.cursor.pos.x = 0;
+                        self.term.set_dirt(y, y);
+                    },
+                    '\x08' => {
+                        if (self.term.cursor.pos.x > 0) {
+                            self.term.cursor.pos.x -= 1;
+                            self.term.line[y][self.term.cursor.pos.x] = Glyph.initEmpty();
                             self.term.set_dirt(y, y);
                         }
-                    } else {
-                        self.term.set_dirt(y, y);
-                    }
-                }
-            } else if (byte == '\n') { // New line
-                self.term.cursor.pos.x = 0;
-                self.term.cursor.pos.y += 1;
-                if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-                    // Scroll up
-                    for (0..self.term.size_grid.rows - 1) |i| {
-                        self.term.line[i] = self.term.line[i + 1];
-                    }
-                    self.term.line[self.term.size_grid.rows - 1] = [_]Glyph{Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() }} ** c.MAX_COLS;
-                    self.term.cursor.pos.y -= 1;
-                    // Mark all lines as dirty due to scrolling
-                    self.term.fulldirt();
-                } else {
-                    self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
+                    },
+                    '\t' => self.term.tputtab(1),
+                    else => {
+                        if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
+                            if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
+                                self.term.line[y][x] = Glyph{
+                                    .u = codepoint,
+                                    .fg_index = self.term.cursor.attr.fg_index,
+                                    .bg_index = self.term.cursor.attr.bg_index,
+                                    .mode = self.term.cursor.attr.mode,
+                                };
+                                self.term.cursor.pos.x += 1;
+                                if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
+                                    self.term.cursor.pos.x = 0;
+                                    if (self.term.cursor.pos.y < self.term.size_grid.rows - 1) {
+                                        self.term.cursor.pos.y += 1;
+                                    } else {
+                                        self.scrollUp(1);
+                                    }
+                                }
+                                self.term.set_dirt(y, self.term.cursor.pos.y);
+                                // Reset attributes after placing character
+                                self.term.cursor.attr = Glyph.initEmpty();
+                                std.log.debug("Reset cursor attributes after glyph: u={x}, fg={d}, bg={d}, mode={any}", .{
+                                    self.term.cursor.attr.u,
+                                    self.term.cursor.attr.fg_index,
+                                    self.term.cursor.attr.bg_index,
+                                    self.term.cursor.attr.mode,
+                                });
+                            }
+                        }
+                    },
                 }
             }
         }
@@ -1320,30 +2124,59 @@ pub const XlibTerminal = struct {
         try self.xdrawglyphfontspecs(row, x1, y1, x2 - x1);
     }
     pub fn xdrawglyphfontspecs(self: *XlibTerminal, glyphs: []const Glyph, x: u16, y: u16, len: usize) !void {
+        if (len == 0 or len > c.MAX_COLS) {
+            std.log.err("Invalid glyph length: {d}", .{len});
+            return error.InvalidGlyphLength;
+        }
         const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
         const char_width = self.dc.font.size.width;
         const char_height = self.dc.font.size.height;
-        const px = borderpx + x * char_width;
-        const py = borderpx + y * char_height + self.dc.font.ascent; // Adjust for ascent
-
-        // Process glyphs in segments with the same attributes
+        const ascent = self.dc.font.ascent;
+        if (char_width == 0 or char_height == 0 or char_width > 72 or char_height > 72 or ascent > 72) {
+            std.log.err("Invalid font metrics: width={d}, height={d}, ascent={d}", .{ char_width, char_height, ascent });
+            return error.InvalidFontSize;
+        }
+        const x_scaled = std.math.mul(u16, x, char_width) catch return error.Overflow;
+        const px = std.math.add(u16, borderpx, x_scaled) catch return error.Overflow;
+        const y_scaled = std.math.mul(u16, y, char_height) catch return error.Overflow;
+        const py_base = std.math.add(u16, borderpx, y_scaled) catch return error.Overflow;
+        const py = std.math.add(u16, py_base, @as(u16, @intCast(ascent))) catch return error.Overflow;
+        // std.log.debug("xdrawglyphfontspecs: x={d}, y={d}, len={d}, px={d}, py={d}", .{ x, y, len, px, py });
+        const total_width = std.math.mul(u16, char_width, @as(u16, @intCast(len))) catch return error.Overflow;
+        const clear_rect = c.xcb_rectangle_t{
+            .x = @intCast(px),
+            .y = @intCast(py_base),
+            .width = @intCast(total_width),
+            .height = @intCast(char_height),
+        };
+        // std.log.debug("Clearing rect: x={d}, y={d}, w={d}, h={d}", .{ clear_rect.x, clear_rect.y, clear_rect.width, clear_rect.height });
+        _ = c.xcb_poly_fill_rectangle(
+            self.connection,
+            self.pixmap,
+            self.dc.gc,
+            1,
+            &clear_rect,
+        );
+        var default_bg_color = self.dc.col[c.defaultbg].color;
+        const bg_pixel = font.xcb_color_to_uint32(default_bg_color.cval().*) | 0xff000000;
+        const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
+        const values = [_]u32{ bg_pixel, 0 };
+        _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
         var start: usize = 0;
         var current_glyph = glyphs[0];
         var text: [c.MAX_COLS]u32 = undefined;
         var text_len: u32 = 0;
-
         for (glyphs[0..len], 0..) |glyph, i| {
             if (i > 0 and !ATTRCMP(current_glyph, glyph) or i == len - 1) {
-                // Include the last glyph if at the end
                 const end = if (i == len - 1 and ATTRCMP(current_glyph, glyph)) i + 1 else i;
-
-                // Collect text for the current segment
                 text_len = 0;
                 for (glyphs[start..end]) |g| {
-                    text[text_len] = g.u; // Include all glyphs, even spaces
+                    if (g.u < 0x20 or !unicode.utf8ValidCodepoint(@intCast(g.u))) {
+                        continue;
+                    }
+                    text[text_len] = g.u;
                     text_len += 1;
                 }
-
                 if (text_len > 0) {
                     var fg_color = self.dc.col[current_glyph.fg_index].color;
                     var bg_color = self.dc.col[current_glyph.bg_index].color;
@@ -1352,55 +2185,47 @@ pub const XlibTerminal = struct {
                         fg_color = bg_color;
                         bg_color = temp;
                     }
-
-                    // Clear background
-                    const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-                    const values = [_]u32{ get_rgb_pixel(
-                        self.connection,
-                        get_colormap(self.connection),
-                        bg_color.red,
-                        bg_color.green,
-                        bg_color.blue,
-                    ) | 0xff000000, 0 };
-                    _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
-
-                    const clear_rect = c.xcb_rectangle_t{
-                        .x = @intCast(px + (start - x) * char_width),
-                        .y = @intCast(py - self.dc.font.ascent),
-                        .width = @intCast(char_width * text_len),
-                        .height = @intCast(char_height),
-                    };
-                    _ = c.xcb_poly_fill_rectangle(
-                        self.connection,
-                        self.pixmap,
-                        self.dc.gc,
-                        1,
-                        &clear_rect,
-                    );
-
-                    // Draw text
-                    _ = try self.dc.font.face.drawText(
-                        self.pixmap,
-                        @intCast(px + (start - x) * char_width),
-                        @intCast(py),
-                        text[0..text_len],
-                        fg_color.cval().*,
-                    );
+                    const bg_pixel_group = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
+                    const values_group = [_]u32{ bg_pixel_group, 0 };
+                    _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_group);
+                    const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
+                    const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
+                    const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
+                    const rect_y = std.math.sub(u16, py, @as(u16, @intCast(ascent))) catch return error.Overflow;
+                    if (rect_x > 32767 or rect_y > 32767 or rect_width > 32767) {
+                        std.log.err("Rectangle overflow: x={d}, y={d}, width={d}", .{ rect_x, rect_y, rect_width });
+                        return error.RectangleOverflow;
+                    }
+                    // const clear_rect_group = c.xcb_rectangle_t{
+                    //     .x = @intCast(rect_x),
+                    //     .y = @intCast(rect_y),
+                    //     .width = @intCast(rect_width),
+                    //     .height = @intCast(char_height),
+                    // };
+                    // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
+                    if (text_len > 0) {
+                        _ = try self.dc.font.face.drawText(
+                            self.pixmap,
+                            @intCast(rect_x),
+                            @intCast(py),
+                            text[0..text_len],
+                            fg_color.cval().*,
+                        );
+                    }
                 }
-
                 start = i;
                 current_glyph = glyph;
             }
         }
-
-        // Handle the last segment if not already processed
         if (start < len and text_len == 0) {
             text_len = 0;
             for (glyphs[start..len]) |g| {
+                if (g.u < 0x20 or !unicode.utf8ValidCodepoint(@intCast(g.u))) {
+                    continue;
+                }
                 text[text_len] = g.u;
                 text_len += 1;
             }
-
             if (text_len > 0) {
                 var fg_color = self.dc.col[current_glyph.fg_index].color;
                 var bg_color = self.dc.col[current_glyph.bg_index].color;
@@ -1409,161 +2234,37 @@ pub const XlibTerminal = struct {
                     fg_color = bg_color;
                     bg_color = temp;
                 }
-
-                // Clear background
-                const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-                const values = [_]u32{ get_rgb_pixel(
-                    self.connection,
-                    get_colormap(self.connection),
-                    bg_color.red,
-                    bg_color.green,
-                    bg_color.blue,
-                ) | 0xff000000, 0 };
-                _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
-
-                const clear_rect = c.xcb_rectangle_t{
-                    .x = @intCast(px + (start - x) * char_width),
-                    .y = @intCast(py - self.dc.font.ascent),
-                    .width = @intCast(char_width * text_len),
+                const bg_pixel_group = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
+                const values_group = [_]u32{ bg_pixel_group, 0 };
+                _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_group);
+                const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
+                const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
+                const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
+                const rect_y = std.math.sub(u16, py, @as(u16, @intCast(ascent))) catch return error.Overflow;
+                if (rect_x > 32767 or rect_y > 32767 or rect_width > 32767) {
+                    std.log.err("Rectangle overflow: x={d}, y={d}, width={d}", .{ rect_x, rect_y, rect_width });
+                    return error.RectangleOverflow;
+                }
+                const clear_rect_group = c.xcb_rectangle_t{
+                    .x = @intCast(rect_x),
+                    .y = @intCast(rect_y),
+                    .width = @intCast(rect_width),
                     .height = @intCast(char_height),
                 };
-                _ = c.xcb_poly_fill_rectangle(
-                    self.connection,
-                    self.pixmap,
-                    self.dc.gc,
-                    1,
-                    &clear_rect,
-                );
-
-                // Draw text
-                _ = try self.dc.font.face.drawText(
-                    self.pixmap,
-                    @intCast(px + (start - x) * char_width),
-                    @intCast(py),
-                    text[0..text_len],
-                    fg_color.cval().*,
-                );
+                _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
+                if (text_len > 0) {
+                    _ = try self.dc.font.face.drawText(
+                        self.pixmap,
+                        @intCast(rect_x),
+                        @intCast(py),
+                        text[0..text_len],
+                        fg_color.cval().*,
+                    );
+                }
             }
         }
     }
     //TODO:Rendering optimization: The current implementation of xdrawglyphontspecs renders pixel by pixel, which is slow. You can use xcb_put_image to render entire glyphs.
-    // fn xdrawglyphfontspecs(self: *XlibTerminal, glyphs: []const Glyph, x: u16, y: u16, len: usize) !void {
-    //     const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
-    //     const pixel_size =
-    //         font.getPixelSize(self.dc.font.face.pattern);
-    //     const s_tmp = pixel_size + pixel_size;
-
-    //     const px = borderpx + x * @as(u16, @intFromFloat(pixel_size));
-    //     const py = borderpx + y * @as(u16, @intFromFloat(s_tmp));
-
-    //     // Convert glyphs to UTF-32 text
-    //     var text: [c.MAX_COLS]u32 = undefined;
-    //     var text_len: u32 = 0;
-    //     for (glyphs[0..len]) |glyph| {
-    //         if (glyph.u != ' ') {
-    //             text[text_len] = glyph.u;
-    //             text_len += 1;
-    //         }
-    //     }
-    //     if (text_len == 0) return;
-    //     const width: u16 = @intFromFloat(
-    //         (pixel_size * @as(
-    //             f64,
-    //             @floatFromInt(text.len),
-    //         ) / 1.6) + pixel_size * 0.7,
-    //     );
-    //     const height: u16 = @intFromFloat(
-    //         pixel_size + pixel_size * 0.4,
-    //     );
-
-    //     // const utf_holder = font.UtfHolder{ .str = &text, .length = text_len };
-    //     const bg_index = if (glyphs[0].bg_index < self.dc.col.len) glyphs[0].bg_index else blk: {
-    //         std.log.warn("bg_index {} out of bounds, clamping to defaultbg", .{glyphs[0].bg_index});
-    //         break :blk c.defaultbg;
-    //     };
-    //     const fg_index = if (glyphs[0].fg_index < self.dc.col.len) glyphs[0].fg_index else blk: {
-    //         std.log.warn("fg_index {} out of bounds, clamping to defaultfg", .{glyphs[0].fg_index});
-    //         break :blk c.defaultfg;
-    //     };
-    //     // var bg_color = self.dc.col[bg_index].color;
-    //     var fg_color = self.dc.col[fg_index].color;
-
-    //     if (comptime util.isDebug) {
-    //         std.log.debug("xdrawglyphfontspecs: bg_index={}, fg_index={}, bg_pixel={x}, fg_pixel={x}", .{
-    //             bg_index,
-    //             fg_index,
-    //             self.dc.col[bg_index].pixel,
-    //             self.dc.col[fg_index].pixel,
-    //         });
-    //     }
-
-    //     const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-    //     const values = [_]u32{
-    //         font.xcb_color_to_uint32(fg_color.cval().*) | 0xff000000,
-    //         0,
-    //     };
-    //     _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
-
-    //     const clear_rect = c.xcb_rectangle_t{
-    //         // .x = @intCast(advance.x),
-    //         // .y = @intCast(advance.y),
-    //         // .x = 50 - @as(i16, @intCast(self.dc.font.ascent)),
-    //         // .y = 60 - @as(i16, @intCast(self.dc.font.ascent)),
-
-    //         .x = 0,
-    //         .y = 0,
-    //         .width = width,
-    //         .height = height,
-
-    //         // .width = self.win.win_size.width,
-    //         // .height = self.win.win_size.height,
-    //     };
-    //     _ = c.xcb_poly_fill_rectangle(
-    //         self.connection,
-    //         self.pixmap,
-    //         self.dc.gc,
-    //         1,
-    //         &clear_rect,
-    //     );
-
-    //     _ = try self.dc.font.face.drawText(
-    //         self.pixmap,
-    //         @intCast(px),
-    //         @intCast(py),
-    //         &text,
-    //         fg_color.cval().*,
-    //     );
-
-    //     // const text_pixmap = try font.createTextPixmap(
-    //     //     self.connection,
-    //     //     &self.dc.font.face,
-    //     //     &text,
-    //     //     fg_color.cval().*,
-    //     //     bg_color.cval().*,
-    //     //     self.dc.font.face.pattern,
-    //     //     self.visual,
-    //     //     self.dc.gc,
-    //     // );
-
-    //     // errdefer _ = c.xcb_free_pixmap(self.connection, text_pixmap);
-
-    //     // _ = c.xcb_copy_area(
-    //     //     self.connection,
-    //     //     text_pixmap,
-    //     //     self.pixmap,
-    //     //     self.dc.gc,
-    //     //     0,
-    //     //     0,
-    //     //     @intCast(px),
-    //     //     @intCast(py),
-    //     //     @intCast(self.dc.font.size.width * len),
-    //     //     @intCast(self.dc.font.size.height),
-    //     // );
-
-    //     // _ = c.xcb_free_pixmap(self.connection, text_pixmap);
-    //     _ = c.xcb_flush(self.connection);
-    // }
-    //
 
     pub fn testCookie(cookie: c.xcb_void_cookie_t, conn: *c.xcb_connection_t, err_msg: []const u8) void {
         const e = c.xcb_request_check(conn, cookie);
@@ -1577,9 +2278,8 @@ pub const XlibTerminal = struct {
     inline fn sixd_to_16bit(x: u3) u16 {
         return @as(u16, @intCast(if (x == 0) 0 else 0x3737 + 0x2828 * @as(u16, @intCast(x))));
     }
-    inline fn xloadcolor(
+    pub fn xloadcolor(
         conn: *c.xcb_connection_t,
-        // screen: *c.xc_screen_t,
         visual: *c.xcb_visualtype_t,
         i: usize,
         color_name: ?[*:0]const u8,
@@ -1611,13 +2311,18 @@ pub const XlibTerminal = struct {
                     xcolor.green = val;
                     xcolor.blue = val;
                 }
-                return color_alloc_value(
+                const success = color_alloc_value(
                     conn,
                     visual,
                     get_colormap(conn),
                     &xcolor,
                     color,
                 );
+                if (!success) {
+                    std.log.err("Failed to allocate color for index {}", .{i});
+                    return false;
+                }
+                return true;
             }
             break :blk c.colorname[i];
         };
@@ -1632,24 +2337,33 @@ pub const XlibTerminal = struct {
                     .blue = @as(u16, @truncate(rgb)) << 8,
                     .alpha = 0xffff,
                 };
-                return color_alloc_value(
+                const success = color_alloc_value(
                     conn,
                     visual,
                     get_colormap(conn),
                     &xcolor,
                     color,
                 );
+                if (!success) {
+                    std.log.err("Failed to allocate hex color {s}", .{name});
+                    return false;
+                }
+                return true;
             } else |_| {
                 return false;
             }
         }
 
-        return color_alloc_name(
+        const success = color_alloc_name(
             conn,
             get_colormap(conn),
             name,
             color,
         );
+        if (!success) {
+            return false;
+        }
+        return true;
     }
     // Error set for xgetcolor
     const XGetColorError = error{
@@ -1682,78 +2396,250 @@ pub const XlibTerminal = struct {
             .{ .fd = xfd, .events = std.posix.POLL.IN, .revents = 0 },
             .{ .fd = self.pty.master, .events = std.posix.POLL.IN, .revents = 0 },
         };
-        var buffer: [8024]u8 = undefined;
+        var buffer: [c.BUFSIZ]u8 = undefined;
+        const poll_timeout_ms = 100;
 
         while (true) {
-            _ = std.posix.poll(&fds, -1) catch |err| {
+            const result = posix.waitpid(self.pid, posix.W.NOHANG);
+            if (result.pid > 0) {
+                std.log.info("Child process {} exited with status {}", .{ result.pid, result.status });
+                self.deinit();
+                return;
+            }
+
+            const poll_result = std.posix.poll(&fds, poll_timeout_ms) catch |err| {
                 std.log.err("poll error: {}", .{err});
+                self.deinit();
                 return err;
             };
 
-            if (fds[0].revents & std.posix.POLL.IN != 0) {
-                while (true) {
-                    const event = c.xcb_poll_for_event(self.connection) orelse break;
-                    defer std.c.free(event);
-                    try self.handleEvent(event);
+            var input_processed = false;
+
+            if (poll_result == 0) {
+                if (self.term.dirty.count() > 0) {
+                    std.log.debug("Timeout redraw: {} dirty rows", .{self.term.dirty.count()});
+                    try self.redraw();
+                }
+                continue;
+            }
+
+            if (fds[0].revents != 0) {
+                if (fds[0].revents & std.posix.POLL.IN != 0) {
+                    while (true) {
+                        const event = c.xcb_poll_for_event(self.connection) orelse break;
+                        defer std.c.free(event);
+                        try self.handleEvent(event);
+                    }
+                }
+                if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
+                    std.log.err("XCB connection closed or errored: revents={}", .{fds[0].revents});
+                    self.deinit();
+                    return error.XcbConnectionError;
                 }
             }
 
-            if (fds[1].revents & std.posix.POLL.IN != 0) {
-                const n = posix.read(self.pty.master, &buffer) catch |err| {
-                    std.log.err("read error from pty: {}", .{err});
-                    continue;
-                };
-                if (n > 0) {
-                    // Process PTY output
-                    for (buffer[0..n]) |char| {
-                        if (char == '\n') {
-                            self.term.cursor.pos.x = 0;
-                            self.term.cursor.pos.y += 1;
-                            if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-                                self.term.cursor.pos.y = self.term.size_grid.rows - 1;
-                                util.move([240]Glyph, self.term.line[0 .. self.term.size_grid.rows - 1], self.term.line[1..self.term.size_grid.rows]);
-                                @memset(&self.term.line[self.term.size_grid.rows - 1], Glyph{
-                                    .u = ' ',
-                                    .fg_index = c.defaultfg,
-                                    .bg_index = c.defaultbg,
-                                    .mode = GLyphMode.initEmpty(),
-                                });
-                            }
-                            self.term.dirty.set(self.term.cursor.pos.y);
-                        } else if (char >= 32 and char <= 126) {
-                            if (self.term.cursor.pos.x < self.term.size_grid.cols and self.term.cursor.pos.y < self.term.size_grid.rows) {
-                                self.term.line[self.term.cursor.pos.y][self.term.cursor.pos.x] = Glyph{
-                                    .u = char,
-                                    .fg_index = c.defaultfg,
-                                    .bg_index = c.defaultbg,
-                                    .mode = GLyphMode.initEmpty(),
-                                };
-                                self.term.cursor.pos.x += 1;
-                                if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
-                                    self.term.cursor.pos.x = 0;
-                                    self.term.cursor.pos.y += 1;
-                                    if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-                                        self.term.cursor.pos.y = self.term.size_grid.rows - 1;
-                                        util.move([240]Glyph, self.term.line[0 .. self.term.size_grid.rows - 1], self.term.line[1..self.term.size_grid.rows]);
-                                        @memset(&self.term.line[self.term.size_grid.rows - 1], Glyph{
-                                            .u = ' ',
-                                            .fg_index = c.defaultfg,
-                                            .bg_index = c.defaultbg,
-                                            .mode = GLyphMode.initEmpty(),
-                                        });
-                                    }
-                                }
-                                self.term.dirty.set(self.term.cursor.pos.y);
-                            }
-                        }
+            if (fds[1].revents != 0) {
+                if (fds[1].revents & std.posix.POLL.IN != 0) {
+                    const n = self.pty.read(&buffer) catch |err| {
+                        std.log.err("read error from pty: {}", .{err});
+                        continue;
+                    };
+                    if (n == 0) {
+                        std.log.info("PTY closed, exiting", .{});
+                        self.deinit();
+                        return;
                     }
-                    try self.redraw();
-                } else if (n == 0) {
-                    break;
+                    std.log.debug("Raw PTY input ({d} bytes): {x}", .{ n, buffer[0..n] });
+                    try self.process_input(buffer[0..n]);
+                    input_processed = true;
                 }
+                if (fds[1].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
+                    std.log.err("PTY closed or errored: revents={}", .{fds[1].revents});
+                    self.deinit();
+                    return error.PtyError;
+                }
+            }
+
+            if (input_processed) {
+                std.log.debug("Triggering redraw: input_processed={}, dirty_count={}", .{ input_processed, self.term.dirty.count() });
+                try self.redraw();
             }
         }
     }
+
+    // pub fn run(self: *Self) !void {
+    //     const xfd = c.xcb_get_file_descriptor(self.connection);
+    //     var fds: [2]std.posix.pollfd = .{
+    //         .{ .fd = xfd, .events = std.posix.POLL.IN, .revents = 0 },
+    //         .{ .fd = self.pty.master, .events = std.posix.POLL.IN, .revents = 0 },
+    //     };
+    //     var buffer: [4096]u8 = undefined;
+    //     var utf8_buffer: [4096]u8 = undefined;
+    //     var utf32_buffer: [4096]u32 = undefined;
+    //     const poll_timeout_ms = 100;
+
+    //     while (true) {
+    //         const result = posix.waitpid(self.pid, posix.W.NOHANG);
+    //         if (result.pid > 0) {
+    //             std.log.info("Child process {} exited with status {}", .{ result.pid, result.status });
+    //             self.deinit();
+    //             return;
+    //         }
+
+    //         const poll_result = std.posix.poll(&fds, poll_timeout_ms) catch |err| {
+    //             std.log.err("poll error: {}", .{err});
+    //             self.deinit();
+    //             return err;
+    //         };
+
+    //         if (poll_result == 0) {
+    //             if (self.term.dirty.count() > 0) {
+    //                 try self.redraw();
+    //             }
+    //             continue;
+    //         }
+
+    //         if (fds[0].revents != 0) {
+    //             if (fds[0].revents & std.posix.POLL.IN != 0) {
+    //                 while (true) {
+    //                     const event = c.xcb_poll_for_event(self.connection) orelse break;
+    //                     defer std.c.free(event);
+    //                     try self.handleEvent(event);
+    //                 }
+    //             }
+    //             if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
+    //                 std.log.err("XCB connection closed or errored: revents={}", .{fds[0].revents});
+    //                 self.deinit();
+    //                 return error.XcbConnectionError;
+    //             }
+    //         }
+
+    //         if (fds[1].revents != 0) {
+    //             if (fds[1].revents & std.posix.POLL.IN != 0) {
+    //                 const n = self.pty.read(&buffer) catch |err| {
+    //                     std.log.err("read error from pty: {}", .{err});
+    //                     continue;
+    //                 };
+    //                 if (n == 0) {
+    //                     std.log.info("PTY closed, exiting", .{});
+    //                     self.deinit();
+    //                     return;
+    //                 }
+
+    //                 var input = buffer[0..n];
+    //                 var redraw_needed = false;
+
+    //                 // Log raw input for debugging
+    //                 std.log.debug("PTY input: {x}", .{input});
+
+    //                 var pos: usize = 0;
+    //                 while (pos < input.len) {
+    //                     const valid_len = util.utf8_validate_pos(input[pos..]) orelse {
+    //                         std.log.warn("Skipping invalid UTF-8 at position {}", .{pos});
+    //                         pos += 1;
+    //                         continue;
+    //                     };
+    //                     const chunk = input[pos .. pos + valid_len];
+    //                     pos += valid_len;
+
+    //                     const codepoints = util.decode_utf8_to_utf32(chunk, &utf32_buffer) catch |err| {
+    //                         std.log.err("UTF-8 decode error at position {}: {}", .{ pos, err });
+    //                         continue;
+    //                     };
+
+    //                     // Log decoded codepoints
+    //                     std.log.debug("Decoded codepoints: {x}", .{codepoints});
+
+    //                     if (self.term.mode.isSet(.MODE_ECHO)) {
+    //                         for (chunk) |byte| {
+    //                             _ = posix.write(self.pty.master, &[_]u8{byte}) catch |err| {
+    //                                 std.log.err("write error to pty: {}", .{err});
+    //                             };
+    //                         }
+    //                     }
+
+    //                     for (codepoints) |codepoint| {
+    //                         if (self.term.esc_mode.isSet(.ESC_START)) {
+    //                             const utf8_len = util.utf8Encode(u32, @intCast(codepoint), &utf8_buffer);
+    //                             std.log.debug("Processing ESC codepoint: {}", .{codepoint});
+    //                             self.term.csi_escape.parse_esc(self, utf8_buffer[0..utf8_len]);
+    //                             continue;
+    //                         }
+
+    //                         const x = self.term.cursor.pos.x;
+    //                         const y = self.term.cursor.pos.y;
+
+    //                         switch (codepoint) {
+    //                             '\n' => {
+    //                                 self.term.cursor.pos.x = 0;
+    //                                 self.term.cursor.pos.y += 1;
+    //                                 if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
+    //                                     self.term.cursor.pos.y = self.term.size_grid.rows - 1;
+    //                                     self.scrollUp(1);
+    //                                 } else {
+    //                                     self.term.dirty.set(self.term.cursor.pos.y);
+    //                                 }
+    //                             },
+    //                             '\r' => {
+    //                                 self.term.cursor.pos.x = 0;
+    //                                 self.term.dirty.set(self.term.cursor.pos.y);
+    //                             },
+    //                             '\x08' => {
+    //                                 if (self.term.cursor.pos.x > 0) {
+    //                                     self.term.cursor.pos.x -= 1;
+    //                                     self.term.line[y][self.term.cursor.pos.x].u = ' ';
+    //                                     self.term.dirty.set(self.term.cursor.pos.y);
+    //                                 }
+    //                             },
+    //                             else => {
+    //                                 // Only store printable, valid Unicode characters
+    //                                 if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
+    //                                     if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
+    //                                         self.term.line[y][x] = Glyph{
+    //                                             .u = codepoint,
+    //                                             .fg_index = self.term.cursor.attr.fg_index,
+    //                                             .bg_index = self.term.cursor.attr.bg_index,
+    //                                             .mode = self.term.cursor.attr.mode,
+    //                                         };
+    //                                         self.term.cursor.pos.x += 1;
+    //                                         if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
+    //                                             self.term.cursor.pos.x = 0;
+    //                                             self.term.cursor.pos.y += 1;
+    //                                             if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
+    //                                                 self.term.cursor.pos.y = self.term.size_grid.rows - 1;
+    //                                                 self.scrollUp(1);
+    //                                             } else {
+    //                                                 self.term.dirty.set(self.term.cursor.pos.y);
+    //                                             }
+    //                                         } else {
+    //                                             self.term.dirty.set(self.term.cursor.pos.y);
+    //                                         }
+    //                                     }
+    //                                 } else {
+    //                                     std.log.debug("Skipping non-printable codepoint: {x}", .{codepoint});
+    //                                 }
+    //                             },
+    //                         }
+    //                         redraw_needed = true;
+    //                     }
+
+    //                     if (util.containsCharT(u32, codepoints, 0x1B)) {
+    //                         self.term.esc_mode.set(.ESC_START);
+    //                     }
+    //                 }
+
+    //                 if (redraw_needed) {
+    //                     try self.redraw();
+    //                 }
+    //             }
+    //             if (fds[1].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
+    //                 std.log.err("PTY closed or errored: revents={}", .{fds[1].revents});
+    //                 self.deinit();
+    //                 return error.PtyError;
+    //             }
+    //         }
+    //     }
+    // }
     pub fn xstartdraw(self: *Self) bool {
         return self.win.mode.isSet(.MODE_VISIBLE);
     }
@@ -1792,20 +2678,44 @@ pub const XlibTerminal = struct {
         _ = c.xcb_flush(self.connection);
     }
 
+    pub fn set_size_hints(self: *XlibTerminal) void {
+        const char_width = self.dc.font.size.width;
+        const char_height = self.dc.font.size.height;
+        const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
+        const hints = [_]u32{
+            char_width, // width_inc
+            char_height, // height_inc
+            2 * borderpx, // base_width
+            2 * borderpx, // base_height
+                // ... other hints ...
+        };
+        _ = c.xcb_change_property(
+            self.connection,
+            c.XCB_PROP_MODE_REPLACE,
+            get_main_window(self.connection),
+            get_atom(self.connection, "_NET_WM_SIZE_HINTS"),
+            c.XCB_ATOM_WM_SIZE_HINTS,
+            32,
+            hints.len,
+            &hints,
+        );
+    }
+
     fn handleEvent(self: *Self, event: *c.xcb_generic_event_t) !void {
         const event_type = event.response_type & ~@as(u8, 0x80);
         switch (event_type) {
             c.XCB_EXPOSE => {
                 const expose_event = @as(*c.xcb_expose_event_t, @ptrCast(event));
                 if (expose_event.window == get_main_window(self.connection)) {
-                    self.term.dirty.setRangeValue(.{ .start = 0, .end = self.term.size_grid.rows }, true);
+                    self.term.fulldirt();
                     try self.redraw();
                 }
             },
             c.XCB_KEY_PRESS => {
                 const key_event = @as(*c.xcb_key_press_event_t, @ptrCast(event));
                 if (key_event.event == get_main_window(self.connection)) {
-                    const keysym = key_event.detail;
+                    const keysym = c.xcb_key_symbols_get_keysym(self.keysyms, key_event.detail, 0);
+                    std.log.debug("Key pressed: keysym={x}", .{keysym});
                     if (keysym >= 32 and keysym <= 126) {
                         const char = @as(u8, @intCast(keysym));
                         const x = self.term.cursor.pos.x;
@@ -1823,14 +2733,8 @@ pub const XlibTerminal = struct {
                                 self.term.cursor.pos.y += 1;
                                 if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
                                     self.term.cursor.pos.y = self.term.size_grid.rows - 1;
-                                    // Optionally scroll up
-                                    util.move([240]Glyph, self.term.line[0 .. self.term.size_grid.rows - 1], self.term.line[1..self.term.size_grid.rows]);
-                                    @memset(&self.term.line[self.term.size_grid.rows - 1], Glyph{
-                                        .u = ' ',
-                                        .fg_index = c.defaultfg,
-                                        .bg_index = c.defaultbg,
-                                        .mode = GLyphMode.initEmpty(),
-                                    });
+                                    util.move([c.MAX_COLS]Glyph, self.term.line[0 .. self.term.size_grid.rows - 1], self.term.line[1..self.term.size_grid.rows]);
+                                    @memset(&self.term.line[self.term.size_grid.rows - 1], Glyph.initEmpty());
                                 }
                             }
                             self.term.dirty.set(y);
@@ -1854,21 +2758,11 @@ pub const XlibTerminal = struct {
                         .ws_ypixel = 0,
                     };
                     try self.pty.resize(new_size);
+                    try self.resize(@intCast(config_event.width), @intCast(config_event.height));
                     try self.term.resize(new_size.ws_col, new_size.ws_row);
                     self.win.win_size.width = config_event.width;
                     self.win.win_size.height = config_event.height;
-                    // Recreate pixmap with new size
-                    _ = c.xcb_free_pixmap(self.connection, self.pixmap);
-                    self.pixmap = c.xcb_generate_id(self.connection);
-                    _ = c.xcb_create_pixmap(
-                        self.connection,
-                        self.visual.visual_depth,
-                        self.pixmap,
-                        get_main_window(self.connection),
-                        self.win.win_size.width,
-                        self.win.win_size.height,
-                    );
-                    try self.redraw();
+                    self.set_size_hints();
                 }
             },
             else => {},
@@ -1974,34 +2868,71 @@ pub const XlibTerminal = struct {
 
     //     _ = c.xcb_flush(self.connection);
     // }
-    inline fn redraw(self: *XlibTerminal) !void {
-        // Clear the entire pixmap
-        const clear_rect = c.xcb_rectangle_t{
+    pub fn resize(self: *XlibTerminal, width: u16, height: u16) !void {
+        self.win.win_size.width = width;
+        self.win.win_size.height = height;
+
+        const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
+        const char_width = self.dc.font.size.width;
+        const char_height = self.dc.font.size.height;
+        const cols = @max(1, @as(u16, @intCast((width - 2 * borderpx) / char_width)));
+        const rows = @max(1, @as(u16, @intCast((height - 2 * borderpx) / char_height)));
+
+        self.term.size_grid.cols = cols;
+        self.term.size_grid.rows = rows;
+
+        _ = c.xcb_free_pixmap(self.connection, self.pixmap);
+        self.pixmap = c.xcb_generate_id(self.connection);
+        _ = c.xcb_create_pixmap(
+            self.connection,
+            self.visual.visual_depth,
+            self.pixmap,
+            get_main_window(self.connection),
+            width,
+            height,
+        );
+
+        // Clear pixmap with default background
+        const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
+        const values = [_]u32{ bg_pixel, 0 };
+        _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
+        const clear_rect = c.xcb_rectangle_t{ .x = 0, .y = 0, .width = width, .height = height };
+        _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect);
+
+        // Mark all rows dirty and redraw everything
+        self.term.fulldirt();
+        try self.redraw();
+
+        std.log.info("Resized: width={d}, height={d}, cols={d}, rows={d}", .{ width, height, cols, rows });
+    }
+
+    //TODO:make copy only new lines not full window
+    pub fn redraw(self: *XlibTerminal) !void {
+        const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
+        std.log.debug("Redrawing screen", .{});
+
+        // Очистить весь пиксмап
+        const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
+        const values = [_]u32{ bg_pixel, 0 };
+        _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
+        const full_rect = c.xcb_rectangle_t{
             .x = 0,
             .y = 0,
             .width = self.win.win_size.width,
             .height = self.win.win_size.height,
         };
-        const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-        const values = [_]u32{ self.dc.col[c.defaultbg].pixel | 0xff000000, 0 };
-        _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
-        _ = c.xcb_poly_fill_rectangle(
-            self.connection,
-            self.pixmap,
-            self.dc.gc,
-            1,
-            &clear_rect,
-        );
+        _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &full_rect);
 
-        // Redraw all lines (dirty or not) to ensure no text is lost
-        for (self.term.line[0..self.term.size_grid.rows], 0..) |row, y| {
-            try self.xdrawglyphfontspecs(row[0..self.term.size_grid.cols], 0, @intCast(y), self.term.size_grid.cols);
+        var i: usize = 0;
+        while (i < self.term.size_grid.rows) : (i += 1) {
+            try self.xdrawglyphfontspecs(
+                self.term.line[i][0..self.term.size_grid.cols],
+                0,
+                @intCast(i),
+                self.term.size_grid.cols,
+            );
         }
 
-        // Clear dirty flags
-        self.term.dirty = DirtySet.initEmpty();
-
-        // Copy pixmap to window
         _ = c.xcb_copy_area(
             self.connection,
             self.pixmap,
@@ -2009,13 +2940,15 @@ pub const XlibTerminal = struct {
             self.dc.gc,
             0,
             0,
-            0,
-            0,
-            self.win.win_size.width,
-            self.win.win_size.height,
+            borderpx,
+            borderpx,
+            self.win.win_size.width - 2 * borderpx,
+            self.win.win_size.height - 2 * borderpx,
         );
 
         _ = c.xcb_flush(self.connection);
+        self.term.dirty = DirtySet.initEmpty();
+        std.log.debug("Redraw complete", .{});
     }
     pub fn deinit(self: *Self) void {
         self.pty.deinit();
@@ -2024,5 +2957,27 @@ pub const XlibTerminal = struct {
         _ = c.xcb_free_pixmap(self.connection, self.pixmap);
         _ = c.xcb_destroy_window(self.connection, get_main_window(self.connection)); // Destroy main window
         _ = c.xcb_disconnect(self.connection);
+        _ = c.xcb_key_symbols_free(self.keysyms);
     }
 };
+
+test "Term dirty row handling" {
+    const allocator = std.testing.allocator;
+    var term = try Term.init(allocator, 80, 24);
+
+    // Test set_dirt
+    term.set_dirt(5, 10);
+    try std.testing.expect(term.dirty.isSet(5));
+    try std.testing.expect(term.dirty.isSet(10));
+    try std.testing.expect(!term.dirty.isSet(11));
+    try std.testing.expectEqual(6, term.dirty.count());
+
+    // Test fulldirt
+    term.fulldirt();
+    try std.testing.expectEqual(24, term.dirty.count());
+
+    // Test invalid range
+    term.dirty = DirtySet.initEmpty();
+    term.set_dirt(25, 10); // Invalid range
+    try std.testing.expectEqual(0, term.dirty.count());
+}

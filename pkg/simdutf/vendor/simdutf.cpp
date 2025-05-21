@@ -1,4 +1,3 @@
-/* auto-generated on 2025-04-14 21:04:55 -0400. Do not edit! */
 /* begin file src/simdutf.cpp */
 #include "simdutf.h"
 
