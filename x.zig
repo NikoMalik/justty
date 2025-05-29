@@ -22,17 +22,6 @@ const esc_arg_size = 16;
 const str_buf_size = esc_buf_size;
 const str_arg_size = esc_arg_size;
 
-//*root window - its This is the root window of the X11 display, covering the entire screen.
-// It is controlled by the window manager and serves as a parent for all other windows in the application.
-//It is not directly involved in rendering, but provides a coordinate system and context for other windows.
-
-//*main_window The main terminal window containing design elements (title bar, frames) that are usually added by the window manager.
-// It is the parent of vt_window.
-//Responsible for interaction with the window manager (e.g. resize, move, focus).
-// (text, cursor) are displayed and user inputs (keys, mouse) are processed
-
-//root_window *width propery and more*
-//└── main_window *text, cursor,visual8
 //================================HELP_FUNCTIONS===================================//
 
 pub inline fn ATTRCMP(a: Glyph, b: Glyph) bool {
@@ -134,8 +123,6 @@ const TermMode = data_structs.IntegerBitSet(TermModeFlags);
 // };
 
 pub const masks = union(enum(u32)) {
-
-    // mainWinMode
     pub const WINDOW_WM: u32 = c.XCB_CW_BACK_PIXEL | c.XCB_CW_EVENT_MASK | c.XCB_CW_BORDER_PIXEL | c.XCB_CW_BIT_GRAVITY | c.XCB_CW_COLORMAP;
     pub const CHILD_EVENT_MASK: u32 = c.XCB_EVENT_MASK_EXPOSURE | c.XCB_EVENT_MASK_BUTTON_PRESS | c.XCB_EVENT_MASK_BUTTON_RELEASE | c.XCB_EVENT_MASK_BUTTON_MOTION;
 
@@ -190,7 +177,7 @@ const CSIEscape = struct {
 
             if (xterm.term.esc_mode.isSet(.ESC_START) and self.esc_len >= 2) {
                 switch (self.buf[1]) {
-                    '[' => xterm.term.esc_mode.set(.ESC_CSI),
+                    '[' => xterm.term.esc_mode.set(.ESC_CSI), // csi handle
                     '(', ')' => xterm.term.esc_mode.set(.ESC_ALTCHARSET),
                     ']', 'P', '^', '@' => xterm.term.esc_mode.set(.ESC_STR),
                     else => {
@@ -201,12 +188,10 @@ const CSIEscape = struct {
                 }
             }
 
-            if (xterm.term.esc_mode.isSet(.ESC_CSI) and self.esc_len >= 2 and self.buf[1] == '[') {
+            if (xterm.term.esc_mode.isSet(.ESC_CSI) and self.esc_len >= 2) {
                 const final_char_range_start: u8 = '@';
                 const final_char_range_end: u8 = '~';
                 if (self.esc_len > 2 and byte >= final_char_range_start and byte <= final_char_range_end) {
-                    // Remove or adjust this debug print if it's causing raw output
-                    // self.csidump();
                     std.log.debug("Parsed CSI: mode={c}, params={any}, narg={d}, priv={d}", .{
                         self.mode[0],
                         self.params[0..self.narg],
