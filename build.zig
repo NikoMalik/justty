@@ -31,6 +31,7 @@ fn addDep(
     artifact.linkSystemLibrary("xcb-cursor");
     artifact.linkSystemLibrary("xcb-keysyms");
     artifact.linkSystemLibrary("xcb-render");
+    artifact.linkSystemLibrary("xkbcommon");
     artifact.linkSystemLibrary("xcb-renderutil");
     artifact.linkSystemLibrary("xcb-xrm");
 
@@ -178,6 +179,8 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("fontconfig");
     // exe.linkSystemLibrary("X11");
     exe.linkSystemLibrary("xinerama");
+    exe.linkSystemLibrary("xkbcommon");
+
     exe.linkSystemLibrary("xcb");
     // exe.linkSystemLibrary2("freetype2", .{});
     exe.linkSystemLibrary("xcb-cursor");

@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const data_structs = @import("datastructs.zig");
 const assert = std.debug.assert;
 const unicode = std.unicode;
+const Keysym = @import("keysym.zig");
 const font = @import("xcb_font.zig");
 pub const vtiden: []const u8 = "\x1B[?6c"; // VT102 identification string
 pub const ascii_printable =
@@ -146,6 +147,13 @@ const CSIEscape = struct {
     mode: [2]u8,
 
     const Self = @This();
+    fn reset(self: *Self, xterm: *XlibTerminal) void {
+        xterm.term.esc_mode = EscMode.initEmpty();
+        self.esc_len = 0;
+        self.narg = 0;
+        self.priv = 0;
+        self.mode = [_]u8{ 0, 0 };
+    }
 
     pub fn parse_esc(self: *Self, xterm: *XlibTerminal, data: []const u8) void {
         for (data) |byte| {
@@ -242,8 +250,9 @@ const CSIEscape = struct {
                     }
 
                     xterm.csihandle(self); // Process the CSI sequence
-                    xterm.term.esc_mode = EscMode.initEmpty();
-                    self.esc_len = 0;
+                    self.reset(xterm);
+                    // xterm.term.esc_mode = EscMode.initEmpty();
+                    // self.esc_len = 0;
                 }
             } else if (xterm.term.esc_mode.isSet(.ESC_STR) or xterm.term.esc_mode.isSet(.ESC_ALTCHARSET)) {
                 if (byte == 0x07 or byte == 0x1B) {
@@ -546,7 +555,6 @@ const Term = struct {
 
     fn csi_ed(self: *Term, params: []u32) void {
         const n = params[0];
-        // const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         switch (n) {
             0 => { // Clear below
                 self.tclearregion(self.cursor.pos.x, self.cursor.pos.y, self.size_grid.cols - 1, self.cursor.pos.y);
@@ -1008,12 +1016,7 @@ const Term = struct {
             const n = params[i];
             switch (n) {
                 0 => {
-                    self.cursor.attr = Glyph{
-                        .u = ' ',
-                        .fg_index = c.defaultfg,
-                        .bg_index = c.defaultbg,
-                        .mode = GLyphMode.initEmpty(),
-                    };
+                    self.cursor.attr = Glyph.initEmpty();
                 },
                 1 => self.cursor.attr.mode.set(.ATTR_BOLD),
                 2 => self.cursor.attr.mode.set(.ATTR_FAINT),
@@ -1586,6 +1589,10 @@ pub const XlibTerminal = struct {
     win: TermWindow,
     output_len: usize = 0, // Length of stored output
 
+    xkb_context: *Keysym.Context,
+    xkb_keymap: *Keysym.Keymap,
+    xkb_state: *Keysym.State,
+
     const Self = @This();
 
     pub fn init(allocator: Allocator) !Self {
@@ -1606,7 +1613,18 @@ pub const XlibTerminal = struct {
         // const screen = c.XDefaultScreen(display);
         const root = get_root_window(connection);
 
+        //keysyms
+
         const keysyms = c.xcb_key_symbols_alloc(connection);
+
+        const xkb_context = Keysym.Context.new(.no_flags) orelse return error.XkbContextNewFailed;
+        errdefer xkb_context.unref();
+
+        const xkb_keymap = Keysym.Keymap.newFromNames(xkb_context, null, .no_flags) orelse return error.XkbKeymapNewFailed;
+        errdefer xkb_keymap.unref();
+
+        const xkb_state = Keysym.State.new(xkb_keymap) orelse return error.XkbStateNewFailed;
+        errdefer xkb_state.unref();
 
         const font_query = c.font;
         var xrender_font = try font.XRenderFont.init(connection, allocator, font_query[0..]);
@@ -1659,10 +1677,6 @@ pub const XlibTerminal = struct {
         var dc: DC = undefined;
         errdefer _ = c.xcb_free_gc(connection, dc.gc);
         win.mode.set(WinModeFlags.MODE_NUMLOCK);
-        // if (comptime util.isDebug) {
-        //     if (win.mode.isSet(WinModeFlags.MODE_NUMLOCK)) {
-        //         std.log.info("Window is numlock", .{});
-        //     }
 
         dc.font = .{
             .size = Size{ .width = cw, .height = ch },
@@ -1690,8 +1704,6 @@ pub const XlibTerminal = struct {
                 });
             }
         }
-
-        // const window = get_main_window(connection);
 
         errdefer _ = c.xcb_destroy_window(
             connection,
@@ -1803,7 +1815,18 @@ pub const XlibTerminal = struct {
             .dc = dc,
             .win = win,
             .keysyms = keysyms.?,
+            .xkb_context = xkb_context,
+            .xkb_keymap = xkb_keymap,
+            .xkb_state = xkb_state,
         };
+    }
+
+    fn reset(self: *Self, xterm: *XlibTerminal) void {
+        xterm.term.esc_mode = EscMode.initEmpty();
+        self.esc_len = 0;
+        self.narg = 0;
+        self.priv = 0;
+        self.mode = [_]u8{ 0, 0 };
     }
 
     fn ttywrite(self: *Self, buf: []const u8, len: usize, flush: u8) void {
@@ -1828,32 +1851,25 @@ pub const XlibTerminal = struct {
         var buffer: [4096]u8 = undefined;
         var buf_pos: usize = 0;
 
-        // Проходим по всем строкам терминала
         for (self.term.line[0..rows], 0..) |line, y| {
             const line_len = self.term.linelen(@intCast(y));
-            // Обрабатываем каждую строку
             for (line[0..line_len], 0..) |glyph, x| {
-                // Пропускаем пустые символы в конце строки
                 if (glyph.u == ' ' and x == cols - 1) continue;
-                // Преобразуем кодовую точку Unicode в UTF-8
                 const utf8_len = util.utf8Encode(u32, glyph.u, buffer[buf_pos..]);
                 buf_pos += utf8_len;
 
-                // Если буфер заполнен, отправляем данные в PTY
                 if (buf_pos >= buffer.len - utf_size) {
                     self.ttywrite(buffer[0..buf_pos], buf_pos, 0);
                     buf_pos = 0;
                 }
             }
 
-            // Добавляем перевод строки после каждой строки
             if (buf_pos + 1 < buffer.len) {
                 buffer[buf_pos] = '\n';
                 buf_pos += 1;
             }
         }
 
-        // Отправляем оставшиеся данные
         if (buf_pos > 0) {
             self.ttywrite(buffer[0..buf_pos], buf_pos, 1);
         }
@@ -1940,11 +1956,11 @@ pub const XlibTerminal = struct {
             'd' => self.term.csi_vpa(params),
             'h' => self.term.csi_sm(params, csi.narg, csi.priv, &self.win.mode),
             'm' => {
-                if (csi.narg == 0 or (csi.narg == 1 and params[0] == 0)) {
-                    std.log.debug("Ignoring empty or reset SGR sequence", .{});
-                    return;
+                if (csi.narg == 0) {
+                    self.term.handle_sgr(params);
+                } else {
+                    self.term.csi_sgr(params, csi.narg);
                 }
-                self.term.csi_sgr(params, csi.narg);
             },
             'n' => self.term.csi_dsr(params, self),
             'r' => if (csi.priv == 0) self.term.csi_decstbm(params) else std.log.warn("Unknown private DECSTBM sequence", .{}),
@@ -2018,6 +2034,7 @@ pub const XlibTerminal = struct {
 
         while (pos < data.len) {
             const valid_len = util.utf8_validate_pos(data[pos..]) orelse {
+                std.log.warn("Invalid UTF-8 byte at pos {}", .{pos});
                 pos += 1;
                 continue;
             };
@@ -2030,25 +2047,24 @@ pub const XlibTerminal = struct {
             };
 
             if (self.term.mode.isSet(.MODE_ECHO)) {
-                _ = self.pty.write(chunk) catch {};
+                _ = self.pty.write(chunk) catch |err| {
+                    std.log.err("Failed to echo to PTY: {}", .{err});
+                };
             }
+
             for (codepoints) |codepoint| {
-                std.log.debug("Codepoint: {x}", .{codepoint});
-                const x = self.term.cursor.pos.x;
-                const y = self.term.cursor.pos.y;
-
-                if (codepoint == 0x1B) {
-                    self.term.esc_mode.set(.ESC_START);
-                    continue;
-                }
-
                 if (self.term.esc_mode.isSet(.ESC_START)) {
                     var utf8_buf: [4]u8 = undefined;
                     const len = util.utf8Encode(u32, codepoint, &utf8_buf);
                     self.term.csi_escape.parse_esc(self, utf8_buf[0..len]);
                     continue;
                 }
+
                 switch (codepoint) {
+                    0x1B => {
+                        self.term.esc_mode.set(.ESC_START);
+                        continue;
+                    },
                     '\n' => {
                         self.term.cursor.pos.x = 0;
                         if (self.term.cursor.pos.y < self.term.size_grid.rows - 1) {
@@ -2056,48 +2072,25 @@ pub const XlibTerminal = struct {
                         } else {
                             self.scrollUp(1);
                         }
-                        self.term.set_dirt(y, self.term.cursor.pos.y);
+                        self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
                     },
                     '\r' => {
                         self.term.cursor.pos.x = 0;
-                        self.term.set_dirt(y, y);
+                        self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
                     },
                     '\x08' => {
                         if (self.term.cursor.pos.x > 0) {
                             self.term.cursor.pos.x -= 1;
-                            self.term.line[y][self.term.cursor.pos.x] = Glyph.initEmpty();
-                            self.term.set_dirt(y, y);
+                            self.term.line[self.term.cursor.pos.y][self.term.cursor.pos.x] = Glyph.initEmpty();
+                            self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
                         }
                     },
                     '\t' => self.term.tputtab(1),
                     else => {
                         if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
-                            if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
-                                self.term.line[y][x] = Glyph{
-                                    .u = codepoint,
-                                    .fg_index = self.term.cursor.attr.fg_index,
-                                    .bg_index = self.term.cursor.attr.bg_index,
-                                    .mode = self.term.cursor.attr.mode,
-                                };
-                                self.term.cursor.pos.x += 1;
-                                if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
-                                    self.term.cursor.pos.x = 0;
-                                    if (self.term.cursor.pos.y < self.term.size_grid.rows - 1) {
-                                        self.term.cursor.pos.y += 1;
-                                    } else {
-                                        self.scrollUp(1);
-                                    }
-                                }
-                                self.term.set_dirt(y, self.term.cursor.pos.y);
-                                // Reset attributes after placing character
-                                self.term.cursor.attr = Glyph.initEmpty();
-                                std.log.debug("Reset cursor attributes after glyph: u={x}, fg={d}, bg={d}, mode={any}", .{
-                                    self.term.cursor.attr.u,
-                                    self.term.cursor.attr.fg_index,
-                                    self.term.cursor.attr.bg_index,
-                                    self.term.cursor.attr.mode,
-                                });
-                            }
+                            self.term.tputc(codepoint);
+                        } else {
+                            std.log.debug("Skipping non-printable codepoint: {x}", .{codepoint});
                         }
                     },
                 }
@@ -2686,6 +2679,120 @@ pub const XlibTerminal = struct {
         );
     }
 
+    fn keyboardHandle(self: *Self, event: *c.xcb_generic_event_t, seat: *Keysym.State) !void {
+        const key_event = @as(*c.xcb_key_press_event_t, @ptrCast(event));
+        const keycode = key_event.detail;
+        const modifiers = key_event.state;
+
+        _ = Keysym.State.updateKey(seat, keycode, .down);
+
+        const keysym = Keysym.State.keyGetOneSym(seat, keycode);
+        var buffer: [32]u8 = undefined;
+        const len = Keysym.State.keyGetUtf8(seat, keycode, &buffer);
+        const utf8_str = buffer[0..@intCast(len)];
+
+        std.log.debug("Key pressed: keysym={x}, utf8={s}, modifiers={x}", .{ keysym, utf8_str, modifiers });
+
+        if (modifiers & c.XCB_MOD_MASK_SHIFT != 0 and modifiers & c.XCB_MOD_MASK_1 != 0) {
+            const components: Keysym.State.Component = @enumFromInt(Keysym.State.Component.layout_effective);
+
+            const current_group = Keysym.State.serializeLayout(seat, components);
+            const next_group = (current_group + 1) % 2;
+            _ = Keysym.State.updateMask(seat, 0, 0, 0, next_group, 0, 0);
+            return;
+        }
+
+        switch (keysym) {
+            .Return => {
+                //  '\n' in PTY
+                const char = '\n';
+                _ = posix.write(self.pty.master, &[_]u8{char}) catch |err| {
+                    std.log.err("Failed to write to PTY: {}", .{err});
+                };
+                self.term.cursor.pos.x = 0;
+                if (self.term.cursor.pos.y < self.term.size_grid.rows - 1) {
+                    self.term.cursor.pos.y += 1;
+                } else {
+                    self.scrollUp(1);
+                }
+                self.term.dirty.set(self.term.cursor.pos.y);
+                try self.redraw();
+            },
+            .BackSpace => {
+                if (self.term.cursor.pos.x > 0) {
+                    self.term.cursor.pos.x -= 1;
+                    self.term.line[self.term.cursor.pos.y][self.term.cursor.pos.x] = Glyph.initEmpty();
+                    self.term.dirty.set(self.term.cursor.pos.y);
+                    try self.redraw();
+                }
+                //  '\b' in PTY
+                const char = 0x08;
+                _ = posix.write(self.pty.master, &[_]u8{char}) catch |err| {
+                    std.log.err("Failed to write to PTY: {}", .{err});
+                };
+            },
+            .Left => {
+                if (self.term.cursor.pos.x > 0) {
+                    self.term.cursor.pos.x -= 1;
+                    self.term.dirty.set(self.term.cursor.pos.y);
+                    try self.redraw();
+                }
+            },
+            .Right => {
+                if (self.term.cursor.pos.x < self.term.size_grid.cols - 1) {
+                    self.term.cursor.pos.x += 1;
+                    self.term.dirty.set(self.term.cursor.pos.y);
+                    try self.redraw();
+                }
+            },
+            .Escape => {
+                const char = 0x1B;
+                _ = posix.write(self.pty.master, &[_]u8{char}) catch |err| {
+                    std.log.err("Failed to write to PTY: {}", .{err});
+                };
+                self.term.esc_mode.set(.ESC_START);
+            },
+            else => {
+                if (len > 0) {
+                    _ = posix.write(self.pty.master, utf8_str) catch |err| {
+                        std.log.err("Failed to write to PTY: {}", .{err});
+                    };
+
+                    var utf32_buffer: [1]u32 = undefined;
+                    const codepoints = util.decode_utf8_to_utf32(utf8_str, &utf32_buffer) catch |err| {
+                        std.log.err("UTF-8 decode error: {}", .{err});
+                        return;
+                    };
+
+                    for (codepoints) |codepoint| {
+                        if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
+                            const x = self.term.cursor.pos.x;
+                            const y = self.term.cursor.pos.y;
+                            if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
+                                self.term.line[y][x] = Glyph{
+                                    .u = codepoint,
+                                    .fg_index = c.defaultfg,
+                                    .bg_index = c.defaultbg,
+                                    .mode = GLyphMode.initEmpty(),
+                                };
+                                self.term.cursor.pos.x += 1;
+                                if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
+                                    self.term.cursor.pos.x = 0;
+                                    self.term.cursor.pos.y += 1;
+                                    if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
+                                        self.term.cursor.pos.y = self.term.size_grid.rows - 1;
+                                        self.scrollUp(1);
+                                    }
+                                }
+                                self.term.dirty.set(y);
+                            }
+                        }
+                    }
+                    try self.redraw();
+                }
+            },
+        }
+    }
     fn handleEvent(self: *Self, event: *c.xcb_generic_event_t) !void {
         const event_type = event.response_type & ~@as(u8, 0x80);
         switch (event_type) {
@@ -2699,34 +2806,7 @@ pub const XlibTerminal = struct {
             c.XCB_KEY_PRESS => {
                 const key_event = @as(*c.xcb_key_press_event_t, @ptrCast(event));
                 if (key_event.event == get_main_window(self.connection)) {
-                    const keysym = c.xcb_key_symbols_get_keysym(self.keysyms, key_event.detail, 0);
-                    std.log.debug("Key pressed: keysym={x}", .{keysym});
-                    if (keysym >= 32 and keysym <= 126) {
-                        const char = @as(u8, @intCast(keysym));
-                        const x = self.term.cursor.pos.x;
-                        const y = self.term.cursor.pos.y;
-                        if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
-                            self.term.line[y][x] = Glyph{
-                                .u = char,
-                                .fg_index = c.defaultfg,
-                                .bg_index = c.defaultbg,
-                                .mode = GLyphMode.initEmpty(),
-                            };
-                            self.term.cursor.pos.x += 1;
-                            if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
-                                self.term.cursor.pos.x = 0;
-                                self.term.cursor.pos.y += 1;
-                                if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-                                    self.term.cursor.pos.y = self.term.size_grid.rows - 1;
-                                    util.move([c.MAX_COLS]Glyph, self.term.line[0 .. self.term.size_grid.rows - 1], self.term.line[1..self.term.size_grid.rows]);
-                                    @memset(&self.term.line[self.term.size_grid.rows - 1], Glyph.initEmpty());
-                                }
-                            }
-                            self.term.dirty.set(y);
-                            try self.redraw();
-                        }
-                        _ = posix.write(self.pty.master, &[_]u8{char}) catch {};
-                    }
+                    try self.keyboardHandle(event, self.xkb_state);
                 }
             },
             c.XCB_CONFIGURE_NOTIFY => {
@@ -2938,6 +3018,9 @@ pub const XlibTerminal = struct {
     pub fn deinit(self: *Self) void {
         self.pty.deinit();
         self.dc.font.face.deinit();
+        self.xkb_state.unref();
+        self.xkb_keymap.unref();
+        self.xkb_context.unref();
         _ = c.xcb_free_gc(self.connection, self.dc.gc);
         _ = c.xcb_free_pixmap(self.connection, self.pixmap);
         _ = c.xcb_destroy_window(self.connection, get_main_window(self.connection)); // Destroy main window

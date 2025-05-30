@@ -3,6 +3,7 @@ pub usingnamespace @cImport({
     @cInclude("xcb/xcb.h");
     @cInclude("xcb/xcb_cursor.h");
     @cInclude("xcb/xcb_keysyms.h");
+    @cInclude("xkbcommon/xkbcommon.h");
     @cInclude("xcb/xcb_renderutil.h");
     @cInclude("xcb/xcb_xrm.h");
     @cInclude("xcb/render.h");

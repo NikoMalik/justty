@@ -17,42 +17,6 @@ const TIOCGWINSZ = c.TIOCGWINSZ;
 
 pub const winsize = c.winsize;
 
-//
-//  Terminal Emulator (Parent Process)
-//  Master: Used by the parent (terminal emulator) to send input to and receive output from the child.
-//  Slave: Used by the child (shell) to receive input and send output, acting as its terminal.
-//   |
-//   |--- Holds self.master (fd)
-//   |      |
-//   |      |--- Write: Sends input (e.g., "ls\n") to child
-//   |      |--- Read: Receives output (e.g., "file1 file2\n") from child
-//   |
-//   |--- Forks child process
-//   |
-// Shell (Child Process)
-//   |
-//   |--- Uses self.slave (fd, redirected to STDIN/STDOUT/STDERR)
-//   |      |
-//   |      |--- Read: Receives input from parent (via master)
-//   |      |--- Write: Sends output to parent (via master)
-//
-// Master:
-
-// The master end is a file descriptor used by the parent process (e.g., your terminal emulator).
-// It acts as the controlling side of the PTY, allowing the parent to:
-//     Write data to the PTY, which appears as input to the child process (e.g., typing commands in the terminal).
-//     Read data from the PTY, which is the output produced by the child process (e.g., command output like ls or echo).
-// The master is typically held open by the terminal emulator to interact with the child process running in the PTY.
-//
-//
-// Slave:
-
-// The slave end is a file descriptor used by the child process (e.g., a shell like bash or zsh).
-// It acts as the terminal device for the child, behaving like a real terminal (e.g., /dev/tty).
-// The child process:
-//     Reads from the slave to get input (e.g., user commands sent via the master).
-//     Writes to the slave to produce output (e.g., command results, which are then read by the master).
-// The slave is redirected to the child’s standard input (STDIN), output (STDOUT), and error (STDERR) via dup2 in my exec function.
 pub const Pty = struct {
     const fd = posix.fd_t;
     extern "c" fn setsid() std.c.pid_t; // new session
