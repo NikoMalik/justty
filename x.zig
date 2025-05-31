@@ -118,7 +118,6 @@ const EscMode = data_structs.IntegerBitSet(Esc_flags);
 
 // Bitset for terminal modes
 const TermMode = data_structs.IntegerBitSet(TermModeFlags);
-
 // const elements = enum(u8) {
 //     COPY_FROM_PARENT = c.XCB_COPY_FROM_PARENT,
 // };
@@ -321,7 +320,7 @@ const Font = struct {
 };
 // Drawing Context
 const DC = struct {
-    col: [260]Color, // len: usize,
+    col: [260]Color = undefined, // len: usize,
     font: Font,
     gc: c.xcb_gcontext_t,
 };
@@ -420,8 +419,8 @@ const Term = struct {
                 .buf = undefined,
                 .esc_len = 0,
                 .priv = 0,
-                .params = [_]u32{0} ** esc_arg_size,
                 .narg = 0,
+                .params = [_]u32{0} ** esc_arg_size,
                 .mode = [_]u8{ 0, 0 },
             },
             .esc_mode = EscMode.initEmpty(),
@@ -1684,27 +1683,15 @@ pub const XlibTerminal = struct {
             .face = xrender_font,
         };
 
+        std.log.debug("dc.col size: {}", .{dc.col.len});
         for (&dc.col, 0..) |*color, i| {
             if (!xloadcolor(connection, visual_data.visual, i, null, color)) {
                 if (i < c.colorname.len and c.colorname[i] != null) {
                     std.log.err("cannot allocate color name={s}", .{c.colorname[i].?});
-                    return error.CannotAllocateColor;
-                } else {
-                    std.log.err("cannot allocate color {}", .{i});
-                    return error.CannotAllocateColor;
                 }
             }
-            if (comptime util.isDebug) {
-                std.log.debug("Background color (index {}): pixel={x}, R={}, G={}, B={}", .{
-                    i,
-                    color.pixel,
-                    color.color.red >> 8,
-                    color.color.green >> 8,
-                    color.color.blue >> 8,
-                });
-            }
+            std.log.debug("Color[{}]: pixel={x:0>8}, R={d}, G={d}, B={d}", .{ i, color.pixel, color.color.red >> 8, color.color.green >> 8, color.color.blue >> 8 });
         }
-
         errdefer _ = c.xcb_destroy_window(
             connection,
             root,
@@ -2106,131 +2093,89 @@ pub const XlibTerminal = struct {
             std.log.err("Invalid glyph length: {d}", .{len});
             return error.InvalidGlyphLength;
         }
-        const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
+
+        const borderpx = @max(@as(u16, @intCast(c.borderpx)), 1);
         const char_width = self.dc.font.size.width;
         const char_height = self.dc.font.size.height;
         const ascent = self.dc.font.ascent;
+
         if (char_width == 0 or char_height == 0 or char_width > 72 or char_height > 72 or ascent > 72) {
             std.log.err("Invalid font metrics: width={d}, height={d}, ascent={d}", .{ char_width, char_height, ascent });
             return error.InvalidFontSize;
         }
+
+        // Precompute coordinates with overflow checks
         const x_scaled = std.math.mul(u16, x, char_width) catch return error.Overflow;
         const px = std.math.add(u16, borderpx, x_scaled) catch return error.Overflow;
         const y_scaled = std.math.mul(u16, y, char_height) catch return error.Overflow;
         const py_base = std.math.add(u16, borderpx, y_scaled) catch return error.Overflow;
         const py = std.math.add(u16, py_base, @as(u16, @intCast(ascent))) catch return error.Overflow;
-        // std.log.debug("xdrawglyphfontspecs: x={d}, y={d}, len={d}, px={d}, py={d}", .{ x, y, len, px, py });
+
+        // Clear entire region with default background
         const total_width = std.math.mul(u16, char_width, @as(u16, @intCast(len))) catch return error.Overflow;
+        var fg = self.dc.col[c.defaultfg].color;
+        const default_bg_pixel = font.xcb_color_to_uint32(fg.cval().*) | 0xff000000;
+        const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
+        const values = [_]u32{ default_bg_pixel, 0 };
+        _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
+
         const clear_rect = c.xcb_rectangle_t{
             .x = @intCast(px),
             .y = @intCast(py_base),
             .width = @intCast(total_width),
             .height = @intCast(char_height),
         };
-        // std.log.debug("Clearing rect: x={d}, y={d}, w={d}, h={d}", .{ clear_rect.x, clear_rect.y, clear_rect.width, clear_rect.height });
-        _ = c.xcb_poly_fill_rectangle(
-            self.connection,
-            self.pixmap,
-            self.dc.gc,
-            1,
-            &clear_rect,
-        );
-        var default_bg_color = self.dc.col[c.defaultbg].color;
-        const bg_pixel = font.xcb_color_to_uint32(default_bg_color.cval().*) | 0xff000000;
-        const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-        const values = [_]u32{ bg_pixel, 0 };
-        _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
+        _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect);
+
         var start: usize = 0;
-        var current_glyph = glyphs[0];
         var text: [c.MAX_COLS]u32 = undefined;
         var text_len: u32 = 0;
+        var current_glyph = glyphs[0];
+
         for (glyphs[0..len], 0..) |glyph, i| {
-            if (i > 0 and !ATTRCMP(current_glyph, glyph) or i == len - 1) {
-                const end = if (i == len - 1 and ATTRCMP(current_glyph, glyph)) i + 1 else i;
+            const is_last = i == len - 1;
+            const attrs_differ = if (i > 0) !ATTRCMP(
+                current_glyph,
+                glyph,
+            ) else false;
+            if (attrs_differ or is_last) {
+                const end = if (is_last and !attrs_differ) i + 1 else i;
                 text_len = 0;
+
+                // Filter valid codepoints
                 for (glyphs[start..end]) |g| {
-                    if (g.u < 0x20 or !unicode.utf8ValidCodepoint(@intCast(g.u))) {
-                        continue;
-                    }
+                    if (g.u < 0x20 or !unicode.utf8ValidCodepoint(@intCast(g.u))) continue;
                     text[text_len] = g.u;
                     text_len += 1;
                 }
+
                 if (text_len > 0) {
+                    // Handle colors with reverse mode
                     var fg_color = self.dc.col[current_glyph.fg_index].color;
                     var bg_color = self.dc.col[current_glyph.bg_index].color;
                     if (current_glyph.mode.isSet(.ATTR_REVERSE)) {
-                        const temp = fg_color;
-                        fg_color = bg_color;
-                        bg_color = temp;
+                        std.mem.swap(@TypeOf(fg_color), &fg_color, &bg_color);
                     }
-                    const bg_pixel_group = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
-                    const values_group = [_]u32{ bg_pixel_group, 0 };
-                    _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_group);
+
+                    // Set background color and fill rectangle
+                    const bg_pixel = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
+                    const values_bg = [_]u32{ bg_pixel, 0 };
+                    _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_bg);
+
                     const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
                     const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
                     const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
-                    const rect_y = std.math.sub(u16, py, @as(u16, @intCast(ascent))) catch return error.Overflow;
-                    if (rect_x > 32767 or rect_y > 32767 or rect_width > 32767) {
-                        std.log.err("Rectangle overflow: x={d}, y={d}, width={d}", .{ rect_x, rect_y, rect_width });
-                        return error.RectangleOverflow;
-                    }
-                    // const clear_rect_group = c.xcb_rectangle_t{
-                    //     .x = @intCast(rect_x),
-                    //     .y = @intCast(rect_y),
-                    //     .width = @intCast(rect_width),
-                    //     .height = @intCast(char_height),
-                    // };
-                    // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
-                    if (text_len > 0) {
-                        _ = try self.dc.font.face.drawText(
-                            self.pixmap,
-                            @intCast(rect_x),
-                            @intCast(py),
-                            text[0..text_len],
-                            fg_color.cval().*,
-                        );
-                    }
-                }
-                start = i;
-                current_glyph = glyph;
-            }
-        }
-        if (start < len and text_len == 0) {
-            text_len = 0;
-            for (glyphs[start..len]) |g| {
-                if (g.u < 0x20 or !unicode.utf8ValidCodepoint(@intCast(g.u))) {
-                    continue;
-                }
-                text[text_len] = g.u;
-                text_len += 1;
-            }
-            if (text_len > 0) {
-                var fg_color = self.dc.col[current_glyph.fg_index].color;
-                var bg_color = self.dc.col[current_glyph.bg_index].color;
-                if (current_glyph.mode.isSet(.ATTR_REVERSE)) {
-                    const temp = fg_color;
-                    fg_color = bg_color;
-                    bg_color = temp;
-                }
-                const bg_pixel_group = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
-                const values_group = [_]u32{ bg_pixel_group, 0 };
-                _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_group);
-                const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
-                const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
-                const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
-                const rect_y = std.math.sub(u16, py, @as(u16, @intCast(ascent))) catch return error.Overflow;
-                if (rect_x > 32767 or rect_y > 32767 or rect_width > 32767) {
-                    std.log.err("Rectangle overflow: x={d}, y={d}, width={d}", .{ rect_x, rect_y, rect_width });
-                    return error.RectangleOverflow;
-                }
-                const clear_rect_group = c.xcb_rectangle_t{
-                    .x = @intCast(rect_x),
-                    .y = @intCast(rect_y),
-                    .width = @intCast(rect_width),
-                    .height = @intCast(char_height),
-                };
-                _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
-                if (text_len > 0) {
+                    const rect_y = py_base; // Already offset by ascent in py
+
+                    const clear_rect_group = c.xcb_rectangle_t{
+                        .x = @intCast(rect_x),
+                        .y = @intCast(rect_y),
+                        .width = @intCast(rect_width),
+                        .height = @intCast(char_height),
+                    };
+                    _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
+
+                    // Render text with foreground color
                     _ = try self.dc.font.face.drawText(
                         self.pixmap,
                         @intCast(rect_x),
@@ -2239,10 +2184,57 @@ pub const XlibTerminal = struct {
                         fg_color.cval().*,
                     );
                 }
+
+                start = i;
+                current_glyph = glyph;
             }
         }
+
+        // Handle remaining glyphs
+        if (start < len) {
+            text_len = 0;
+            for (glyphs[start..len]) |g| {
+                if (g.u < 0x20 or !unicode.utf8ValidCodepoint(@intCast(g.u))) continue;
+                text[text_len] = g.u;
+                text_len += 1;
+            }
+
+            if (text_len > 0) {
+                var fg_color = self.dc.col[current_glyph.fg_index].color;
+                var bg_color = self.dc.col[current_glyph.bg_index].color;
+                if (current_glyph.mode.isSet(.ATTR_REVERSE)) {
+                    std.mem.swap(@TypeOf(fg_color), &fg_color, &bg_color);
+                }
+
+                const bg_pixel = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
+                const values_bg = [_]u32{ bg_pixel, 0 };
+                _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_bg);
+
+                const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
+                const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
+                const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
+
+                const clear_rect_group = c.xcb_rectangle_t{
+                    .x = @intCast(rect_x),
+                    .y = @intCast(py_base),
+                    .width = @intCast(rect_width),
+                    .height = @intCast(char_height),
+                };
+                _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
+
+                _ = try self.dc.font.face.drawText(
+                    self.pixmap,
+                    @intCast(rect_x),
+                    @intCast(py),
+                    text[0..text_len],
+                    fg_color.cval().*,
+                );
+            }
+        }
+
+        // Flush to ensure rendering
+        _ = c.xcb_flush(self.connection);
     }
-    //TODO:Rendering optimization: The current implementation of xdrawglyphontspecs renders pixel by pixel, which is slow. You can use xcb_put_image to render entire glyphs.
 
     pub fn testCookie(cookie: c.xcb_void_cookie_t, conn: *c.xcb_connection_t, err_msg: []const u8) void {
         const e = c.xcb_request_check(conn, cookie);
@@ -2444,180 +2436,50 @@ pub const XlibTerminal = struct {
             }
         }
     }
+    // Test redraw
+    // pub fn redraw(self: *XlibTerminal) !void {
+    //     const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
+    //     std.log.debug("Redrawing screen", .{});
 
-    // pub fn run(self: *Self) !void {
-    //     const xfd = c.xcb_get_file_descriptor(self.connection);
-    //     var fds: [2]std.posix.pollfd = .{
-    //         .{ .fd = xfd, .events = std.posix.POLL.IN, .revents = 0 },
-    //         .{ .fd = self.pty.master, .events = std.posix.POLL.IN, .revents = 0 },
+    //     // Clear pixmap with default background
+    //     const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
+    //     const values = [_]u32{ bg_pixel, 0 };
+    //     _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
+    //     const full_rect = c.xcb_rectangle_t{
+    //         .x = 0,
+    //         .y = 0,
+    //         .width = self.win.win_size.width,
+    //         .height = self.win.win_size.height,
     //     };
-    //     var buffer: [4096]u8 = undefined;
-    //     var utf8_buffer: [4096]u8 = undefined;
-    //     var utf32_buffer: [4096]u32 = undefined;
-    //     const poll_timeout_ms = 100;
+    //     _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &full_rect);
 
-    //     while (true) {
-    //         const result = posix.waitpid(self.pid, posix.W.NOHANG);
-    //         if (result.pid > 0) {
-    //             std.log.info("Child process {} exited with status {}", .{ result.pid, result.status });
-    //             self.deinit();
-    //             return;
-    //         }
+    //     // Test rendering with hard-coded red foreground
+    //     var test_glyphs = [_]Glyph{
+    //         Glyph{ .u = 'T', .fg_index = 14, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() }, // Red foreground
+    //         Glyph{ .u = 'e', .fg_index = 14, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() },
+    //         Glyph{ .u = 's', .fg_index = 14, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() },
+    //         Glyph{ .u = 't', .fg_index = 14, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() },
+    //     };
+    //     try self.xdrawglyphfontspecs(test_glyphs[0..], 0, 0, 4);
 
-    //         const poll_result = std.posix.poll(&fds, poll_timeout_ms) catch |err| {
-    //             std.log.err("poll error: {}", .{err});
-    //             self.deinit();
-    //             return err;
-    //         };
+    //     _ = c.xcb_copy_area(
+    //         self.connection,
+    //         self.pixmap,
+    //         get_main_window(self.connection),
+    //         self.dc.gc,
+    //         0,
+    //         0,
+    //         borderpx,
+    //         borderpx,
+    //         self.win.win_size.width - 2 * borderpx,
+    //         self.win.win_size.height - 2 * borderpx,
+    //     );
 
-    //         if (poll_result == 0) {
-    //             if (self.term.dirty.count() > 0) {
-    //                 try self.redraw();
-    //             }
-    //             continue;
-    //         }
-
-    //         if (fds[0].revents != 0) {
-    //             if (fds[0].revents & std.posix.POLL.IN != 0) {
-    //                 while (true) {
-    //                     const event = c.xcb_poll_for_event(self.connection) orelse break;
-    //                     defer std.c.free(event);
-    //                     try self.handleEvent(event);
-    //                 }
-    //             }
-    //             if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-    //                 std.log.err("XCB connection closed or errored: revents={}", .{fds[0].revents});
-    //                 self.deinit();
-    //                 return error.XcbConnectionError;
-    //             }
-    //         }
-
-    //         if (fds[1].revents != 0) {
-    //             if (fds[1].revents & std.posix.POLL.IN != 0) {
-    //                 const n = self.pty.read(&buffer) catch |err| {
-    //                     std.log.err("read error from pty: {}", .{err});
-    //                     continue;
-    //                 };
-    //                 if (n == 0) {
-    //                     std.log.info("PTY closed, exiting", .{});
-    //                     self.deinit();
-    //                     return;
-    //                 }
-
-    //                 var input = buffer[0..n];
-    //                 var redraw_needed = false;
-
-    //                 // Log raw input for debugging
-    //                 std.log.debug("PTY input: {x}", .{input});
-
-    //                 var pos: usize = 0;
-    //                 while (pos < input.len) {
-    //                     const valid_len = util.utf8_validate_pos(input[pos..]) orelse {
-    //                         std.log.warn("Skipping invalid UTF-8 at position {}", .{pos});
-    //                         pos += 1;
-    //                         continue;
-    //                     };
-    //                     const chunk = input[pos .. pos + valid_len];
-    //                     pos += valid_len;
-
-    //                     const codepoints = util.decode_utf8_to_utf32(chunk, &utf32_buffer) catch |err| {
-    //                         std.log.err("UTF-8 decode error at position {}: {}", .{ pos, err });
-    //                         continue;
-    //                     };
-
-    //                     // Log decoded codepoints
-    //                     std.log.debug("Decoded codepoints: {x}", .{codepoints});
-
-    //                     if (self.term.mode.isSet(.MODE_ECHO)) {
-    //                         for (chunk) |byte| {
-    //                             _ = posix.write(self.pty.master, &[_]u8{byte}) catch |err| {
-    //                                 std.log.err("write error to pty: {}", .{err});
-    //                             };
-    //                         }
-    //                     }
-
-    //                     for (codepoints) |codepoint| {
-    //                         if (self.term.esc_mode.isSet(.ESC_START)) {
-    //                             const utf8_len = util.utf8Encode(u32, @intCast(codepoint), &utf8_buffer);
-    //                             std.log.debug("Processing ESC codepoint: {}", .{codepoint});
-    //                             self.term.csi_escape.parse_esc(self, utf8_buffer[0..utf8_len]);
-    //                             continue;
-    //                         }
-
-    //                         const x = self.term.cursor.pos.x;
-    //                         const y = self.term.cursor.pos.y;
-
-    //                         switch (codepoint) {
-    //                             '\n' => {
-    //                                 self.term.cursor.pos.x = 0;
-    //                                 self.term.cursor.pos.y += 1;
-    //                                 if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-    //                                     self.term.cursor.pos.y = self.term.size_grid.rows - 1;
-    //                                     self.scrollUp(1);
-    //                                 } else {
-    //                                     self.term.dirty.set(self.term.cursor.pos.y);
-    //                                 }
-    //                             },
-    //                             '\r' => {
-    //                                 self.term.cursor.pos.x = 0;
-    //                                 self.term.dirty.set(self.term.cursor.pos.y);
-    //                             },
-    //                             '\x08' => {
-    //                                 if (self.term.cursor.pos.x > 0) {
-    //                                     self.term.cursor.pos.x -= 1;
-    //                                     self.term.line[y][self.term.cursor.pos.x].u = ' ';
-    //                                     self.term.dirty.set(self.term.cursor.pos.y);
-    //                                 }
-    //                             },
-    //                             else => {
-    //                                 // Only store printable, valid Unicode characters
-    //                                 if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
-    //                                     if (x < self.term.size_grid.cols and y < self.term.size_grid.rows) {
-    //                                         self.term.line[y][x] = Glyph{
-    //                                             .u = codepoint,
-    //                                             .fg_index = self.term.cursor.attr.fg_index,
-    //                                             .bg_index = self.term.cursor.attr.bg_index,
-    //                                             .mode = self.term.cursor.attr.mode,
-    //                                         };
-    //                                         self.term.cursor.pos.x += 1;
-    //                                         if (self.term.cursor.pos.x >= self.term.size_grid.cols) {
-    //                                             self.term.cursor.pos.x = 0;
-    //                                             self.term.cursor.pos.y += 1;
-    //                                             if (self.term.cursor.pos.y >= self.term.size_grid.rows) {
-    //                                                 self.term.cursor.pos.y = self.term.size_grid.rows - 1;
-    //                                                 self.scrollUp(1);
-    //                                             } else {
-    //                                                 self.term.dirty.set(self.term.cursor.pos.y);
-    //                                             }
-    //                                         } else {
-    //                                             self.term.dirty.set(self.term.cursor.pos.y);
-    //                                         }
-    //                                     }
-    //                                 } else {
-    //                                     std.log.debug("Skipping non-printable codepoint: {x}", .{codepoint});
-    //                                 }
-    //                             },
-    //                         }
-    //                         redraw_needed = true;
-    //                     }
-
-    //                     if (util.containsCharT(u32, codepoints, 0x1B)) {
-    //                         self.term.esc_mode.set(.ESC_START);
-    //                     }
-    //                 }
-
-    //                 if (redraw_needed) {
-    //                     try self.redraw();
-    //                 }
-    //             }
-    //             if (fds[1].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-    //                 std.log.err("PTY closed or errored: revents={}", .{fds[1].revents});
-    //                 self.deinit();
-    //                 return error.PtyError;
-    //             }
-    //         }
-    //     }
+    //     _ = c.xcb_flush(self.connection);
+    //     self.term.dirty = DirtySet.initEmpty();
+    //     std.log.debug("Redraw complete", .{});
     // }
+
     pub fn xstartdraw(self: *Self) bool {
         return self.win.mode.isSet(.MODE_VISIBLE);
     }
@@ -2880,59 +2742,6 @@ pub const XlibTerminal = struct {
         );
     }
 
-    // inline fn redraw(self: *Self) !void {
-    //     var fg_color = self.dc.col[c.defaultfg].color;
-    //     // var bg_color = self.dc.col[c.defaultbg].color;
-    //     // try self.drawSimpleText(10, 20, "hello");
-
-    //     _ = try self.dc.font.face.drawText(
-    //         get_main_window(self.connection),
-    //         0,
-    //         @intCast(self.win.char_size.height - @as(u16, @intCast(self.dc.font.ascent))),
-
-    //         &[_]u32{ 'H', 'e', 'l', 'l', 'o' },
-    //         fg_color.cval().*,
-    //         self.visual.visual_depth,
-    //     );
-    //     const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-    //     const values = [_]u32{
-    //         0xFF000 | 0xff000000,
-    //         0,
-    //     };
-    //     _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
-
-    //     const clear_rect = c.xcb_rectangle_t{
-    //         // .x = try safeLongToI16(advance.x),
-    //         // .y = try safeLongToI16(advance.y),
-    //         .x = 50 - @as(i16, @intCast(self.dc.font.ascent)),
-    //         .y = 60 - @as(i16, @intCast(self.dc.font.ascent)),
-
-    //         .width = self.win.win_size.width,
-    //         .height = self.win.win_size.height,
-    //     };
-    //     _ = c.xcb_poly_fill_rectangle(
-    //         self.connection,
-    //         self.pixmap,
-    //         self.dc.gc,
-    //         1,
-    //         &clear_rect,
-    //     );
-    //     // Copy the pixmap to the window
-    //     // _ = c.xcb_copy_area(
-    //     //     self.connection,
-    //     //     self.pixmap,
-    //     //     get_main_window(self.connection),
-    //     //     self.dc.gc,
-    //     //     0,
-    //     //     0,
-    //     //     0,
-    //     //     0,
-    //     //     self.win.win_size.width,
-    //     //     self.win.win_size.height,
-    //     // );
-
-    //     _ = c.xcb_flush(self.connection);
-    // }
     pub fn resize(self: *XlibTerminal, width: u16, height: u16) !void {
         self.win.win_size.width = width;
         self.win.win_size.height = height;
@@ -2970,13 +2779,12 @@ pub const XlibTerminal = struct {
 
         std.log.info("Resized: width={d}, height={d}, cols={d}, rows={d}", .{ width, height, cols, rows });
     }
-
+    // PROD REDRAW
     //TODO:make copy only new lines not full window
     pub fn redraw(self: *XlibTerminal) !void {
         const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
         std.log.debug("Redrawing screen", .{});
 
-        // Очистить весь пиксмап
         const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
         const values = [_]u32{ bg_pixel, 0 };
         _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);

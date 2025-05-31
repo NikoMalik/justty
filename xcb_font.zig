@@ -4,7 +4,18 @@ const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const xlib = @import("x.zig");
+const Atlas = @import("atlas.zig");
 
+// MAYBE SWITCH TO PANGO + CAIRO?????
+
+//TODO: batch, xcb_render_add_glyphs, text_atlas,cache
+
+const TextCacheEntry = struct {
+    text: []u32,
+    pixmap: c.xcb_pixmap_t,
+    width: u16,
+    height: u16,
+};
 pub const XcbftError = error{
     FontConfigInitFailed,
     ConfigSubstitutionFailed,
@@ -751,6 +762,17 @@ pub const XRenderFont = struct {
     glyphsets: std.AutoHashMap(u32, c.xcb_render_glyphset_t),
     allocator: Allocator,
     dpi: f64,
+    atlas: Atlas,
+    glyph_regions: std.AutoHashMap(u32, GlyphInfo),
+    // GlyphInfo stores atlas region and metrics
+    const GlyphInfo = struct {
+        region: ?Atlas.Region, // null for glyphs with no bitmap (e.g., space)
+        bitmap_left: i32,
+        bitmap_top: i32,
+        advance_x: i32,
+        advance_y: i32,
+        from_fallback: bool, // Track if from fallback font
+    };
 
     const Self = @This();
 
@@ -762,15 +784,16 @@ pub const XRenderFont = struct {
         var fc = try Fontconfig.init(allocator);
         defer fc.deinit();
 
-        // Query a single font pattern
         const pattern = try fc.queryFont(fontquery) orelse {
             std.log.err("font not found: {s}", .{fontquery});
             return error.NoFontMatch;
         };
 
-        // Load FreeType face for the single pattern
         const dpi = try getDpi(conn);
         const ft = try FreeType.loadFace(allocator, pattern, dpi);
+
+        const atlas = try Atlas.init(allocator, 512, .grayscale);
+        const glyph_regions = std.AutoHashMap(u32, GlyphInfo).init(allocator);
 
         return .{
             .conn = conn,
@@ -779,23 +802,98 @@ pub const XRenderFont = struct {
             .glyphsets = std.AutoHashMap(u32, c.xcb_render_glyphset_t).init(allocator),
             .allocator = allocator,
             .dpi = dpi,
+            .atlas = atlas,
+            .glyph_regions = glyph_regions,
         };
     }
-
     pub fn deinit(self: *Self) void {
         var it = self.glyphsets.iterator();
         while (it.next()) |entry| {
             _ = c.xcb_render_free_glyph_set(self.conn, entry.value_ptr.*);
         }
         self.glyphsets.deinit();
-
-        // Free the single pattern
         self.pattern.destroy();
-
         self.ft.deinit();
-        self.glyphsets.clearAndFree();
+        self.atlas.deinit(self.allocator);
+        self.glyph_regions.deinit();
     }
 
+    fn cacheGlyphs(self: *Self, codepoints: []const u32, face: c.FT_Face, is_fallback: bool) !void {
+        _ = c.FT_Select_Charmap(face, c.ft_encoding_unicode);
+        var total_width: u32 = 0;
+        var max_height: u32 = 0;
+        for (codepoints) |codepoint| {
+            const glyph_index = c.FT_Get_Char_Index(face, codepoint);
+            if (glyph_index == 0) continue;
+            try intToError(c.FT_Load_Glyph(face, glyph_index, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_NORMAL));
+            try intToError(c.FT_Render_Glyph(face.*.glyph, c.FT_RENDER_MODE_NORMAL));
+            const bitmap = &face.*.glyph.*.bitmap;
+            total_width += bitmap.*.width;
+            max_height = @max(max_height, bitmap.*.rows);
+        }
+        const region = self.atlas.reserve(self.allocator, total_width, max_height) catch |err| {
+            try self.atlas.grow(self.allocator, self.atlas.size * 2);
+            return err;
+        };
+        var x_offset: u32 = region.x;
+        for (codepoints) |codepoint| {
+            const glyph_index = c.FT_Get_Char_Index(face, codepoint);
+            if (glyph_index == 0) {
+                const pixel_size = getPixelSize(self.pattern, self.dpi);
+                try self.glyph_regions.put(codepoint, .{
+                    .region = null,
+                    .bitmap_left = 0,
+                    .bitmap_top = 0,
+                    .advance_x = @intFromFloat(pixel_size * 0.6),
+                    .advance_y = 0,
+                    .from_fallback = is_fallback,
+                });
+                continue;
+            }
+            try intToError(c.FT_Load_Glyph(face, glyph_index, c.FT_LOAD_RENDER | c.FT_LOAD_TARGET_NORMAL));
+            try intToError(c.FT_Render_Glyph(face.*.glyph, c.FT_RENDER_MODE_NORMAL));
+            const bitmap = &face.*.glyph.*.bitmap;
+            const bitmap_left = face.*.glyph.*.bitmap_left;
+            const bitmap_top = face.*.glyph.*.bitmap_top;
+            const advance_x = @divTrunc(face.*.glyph.*.advance.x, 64);
+            const advance_y = @divTrunc(face.*.glyph.*.advance.y, 64);
+            if (bitmap.*.width == 0 or bitmap.*.rows == 0) {
+                try self.glyph_regions.put(codepoint, .{
+                    .region = null,
+                    .bitmap_left = bitmap_left,
+                    .bitmap_top = bitmap_top,
+                    .advance_x = @intCast(advance_x),
+                    .advance_y = @intCast(advance_y),
+                    .from_fallback = is_fallback,
+                });
+                continue;
+            }
+            const glyph_region = Atlas.Region{
+                .x = x_offset,
+                .y = region.y,
+                .width = bitmap.*.width,
+                .height = bitmap.*.rows,
+            };
+            for (0..bitmap.*.rows) |y| {
+                const atlas_offset = (glyph_region.y + y) * self.atlas.size + glyph_region.x;
+                const bitmap_offset = y * bitmap.*.width;
+                util.copyBytes(
+                    u8,
+                    self.atlas.data[atlas_offset .. atlas_offset + bitmap.*.width],
+                    bitmap.*.buffer[bitmap_offset .. bitmap_offset + bitmap.*.width],
+                );
+            }
+            try self.glyph_regions.put(codepoint, .{
+                .region = glyph_region,
+                .bitmap_left = bitmap_left,
+                .bitmap_top = bitmap_top,
+                .advance_x = @intCast(advance_x),
+                .advance_y = @intCast(advance_y),
+                .from_fallback = is_fallback,
+            });
+            x_offset += bitmap.*.width;
+        }
+    }
     pub fn drawText(
         self: *Self,
         pmap: c.xcb_drawable_t,
@@ -866,7 +964,6 @@ pub const XRenderFont = struct {
         defer _ = c.xcb_render_free_picture(self.conn, fg_pen);
 
         const glyphset_advance = try self.loadGlyphset(utf_holder);
-        defer _ = c.xcb_render_free_glyph_set(self.conn, glyphset_advance.glyphset);
 
         const ts = c.xcb_render_util_composite_text_stream(glyphset_advance.glyphset, utf_holder.length, 0) orelse
             return error.MemoryAllocationFailed;
@@ -908,51 +1005,150 @@ pub const XRenderFont = struct {
 
     fn loadGlyphset(self: *Self, text: UtfHolder) !struct { glyphset: c.xcb_render_glyphset_t, advance: c.FT_Vector } {
         var total_advance = c.FT_Vector{ .x = 0, .y = 0 };
+
+        // Use a persistent glyphset based on DPI
+        const gs_key = @as(u32, @intFromFloat(self.dpi * 10)); // Unique per DPI
+        const gs = if (self.glyphsets.get(gs_key)) |glyphset| glyphset else blk: {
+            const fmt_rep = c.xcb_render_util_query_formats(self.conn);
+            const fmt_a8 = c.xcb_render_util_find_standard_format(fmt_rep, c.XCB_PICT_STANDARD_A_8);
+            if (fmt_a8 == null) return error.NoPictureFormat;
+            const new_gs = c.xcb_generate_id(self.conn);
+            _ = c.xcb_render_create_glyph_set(self.conn, new_gs, fmt_a8.*.id);
+            try self.glyphsets.put(gs_key, new_gs);
+            break :blk new_gs;
+        };
+
+        // Initialize Fontconfig for fallback fonts
         var fc = try Fontconfig.init(self.allocator);
         defer fc.deinit();
 
-        const fmt_rep = c.xcb_render_util_query_formats(self.conn);
-        const fmt_a8 = c.xcb_render_util_find_standard_format(fmt_rep, c.XCB_PICT_STANDARD_A_8);
-        const gs = c.xcb_generate_id(self.conn);
-        _ = c.xcb_render_create_glyph_set(self.conn, gs, fmt_a8.*.id);
-
-        const pixel_size = getPixelSize(self.pattern, self.dpi);
-        // std.log.debug("Using pixel_size for glyphs: {d}", .{pixel_size});
-
+        // Collect unique codepoints
+        var codepoints = std.AutoHashMap(u32, void).init(self.allocator);
+        defer codepoints.deinit();
         for (0..text.length) |i| {
             const codepoint = text.str[i];
             if (codepoint > 0x10FFFF) {
-                // std.log.warn("Invalid Unicode codepoint: U+{x:0>4}", .{codepoint});
+                std.log.warn("Invalid Unicode codepoint: U+{x:0>4}", .{codepoint});
                 continue;
             }
+            try codepoints.put(codepoint, {});
+        }
 
-            var glyph_advance: c.FT_Vector = undefined;
-            const glyph_index = self.ft.getCharIndex(codepoint);
+        // Cache uncached glyphs
+        var uncached = std.ArrayList(u32).init(self.allocator);
+        defer uncached.deinit();
+        var it = codepoints.keyIterator();
+        while (it.next()) |codepoint| {
+            if (!self.glyph_regions.contains(codepoint.*)) {
+                try uncached.append(codepoint.*);
+            }
+        }
 
-            if (glyph_index != null) {
-                glyph_advance = try self.loadGlyph(gs, codepoint);
-            } else {
-                var unsupported_ft = try fc.queryByCharSupport(codepoint, self.pattern, self.dpi);
-                defer unsupported_ft.deinit();
+        if (uncached.items.len > 0) {
+            // Cache glyphs from primary font
+            try self.cacheGlyphs(uncached.items, self.ft.face.?, false);
 
-                if (unsupported_ft.face == null) {
-                    std.log.warn("No font found supporting character: U+{x:0>4}", .{codepoint});
-                    glyph_advance = c.FT_Vector{ .x = @intFromFloat(pixel_size * 0.6), .y = 0 }; // Default advance
-                } else {
-                    const char_size = pixel_size * 64.0;
-                    const dpi_uint: c_uint = @intFromFloat(self.dpi);
-                    try intToError(c.FT_Set_Char_Size(
-                        unsupported_ft.face.?,
-                        0,
-                        @intFromFloat(char_size),
-                        dpi_uint,
-                        dpi_uint,
-                    ));
-                    glyph_advance = try self.loadGlyphWithFace(gs, unsupported_ft.face.?, codepoint);
+            // Handle fallbacks for remaining uncached glyphs
+            var fallback_fonts = std.AutoHashMap(u32, FreeType).init(self.allocator);
+            defer {
+                var fallback_it = fallback_fonts.valueIterator();
+                while (fallback_it.next()) |ft| ft.deinit();
+                fallback_fonts.deinit();
+            }
+
+            var still_uncached = std.ArrayList(u32).init(self.allocator);
+            defer still_uncached.deinit();
+            for (uncached.items) |codepoint| {
+                if (!self.glyph_regions.contains(codepoint)) {
+                    try still_uncached.append(codepoint);
                 }
             }
-            total_advance.x += glyph_advance.x;
-            total_advance.y += glyph_advance.y;
+
+            for (still_uncached.items) |codepoint| {
+                const fallback_ft = try fc.queryByCharSupport(codepoint, self.pattern, self.dpi);
+                const char_size = getPixelSize(self.pattern, self.dpi) * 64.0;
+                const dpi_uint: c_uint = @intFromFloat(self.dpi);
+                try intToError(c.FT_Set_Char_Size(fallback_ft.face.?, 0, @intFromFloat(char_size), dpi_uint, dpi_uint));
+                try self.cacheGlyphs(&[_]u32{codepoint}, fallback_ft.face.?, true);
+                try fallback_fonts.put(codepoint, fallback_ft);
+            }
+        }
+
+        // Precompute total bitmap size for efficiency
+        var total_bitmap_size: usize = 0;
+        it = codepoints.keyIterator();
+        while (it.next()) |codepoint| {
+            if (self.glyph_regions.get(codepoint.*).?.region) |region| {
+                const stride = (region.width + 3) & ~@as(u32, 3);
+                total_bitmap_size += stride * region.height;
+            }
+        }
+
+        // Prepare glyph data
+        var gids = try self.allocator.alloc(u32, codepoints.count());
+        defer self.allocator.free(gids);
+        var ginfos = try self.allocator.alloc(c.xcb_render_glyphinfo_t, codepoints.count());
+        defer self.allocator.free(ginfos);
+        var bitmaps = std.ArrayList(u8).init(self.allocator);
+        defer bitmaps.deinit();
+        try bitmaps.ensureTotalCapacity(total_bitmap_size);
+
+        var index: usize = 0;
+        it = codepoints.keyIterator();
+        while (it.next()) |codepoint| {
+            const glyph_info = self.glyph_regions.get(codepoint.*).?;
+            gids[index] = codepoint.*;
+
+            if (glyph_info.region) |region| {
+                ginfos[index] = c.xcb_render_glyphinfo_t{
+                    .x = @intCast(-glyph_info.bitmap_left),
+                    .y = @intCast(glyph_info.bitmap_top),
+                    .width = @intCast(region.width),
+                    .height = @intCast(region.height),
+                    .x_off = @as(i16, @intCast(glyph_info.advance_x)),
+                    .y_off = @as(i16, @intCast(glyph_info.advance_y)),
+                };
+
+                const stride = (region.width + 3) & ~@as(u32, 3);
+                const offset = region.y * self.atlas.size + region.x;
+                for (0..region.height) |y| {
+                    const src = self.atlas.data[offset + y * self.atlas.size .. offset + y * self.atlas.size + region.width];
+                    bitmaps.appendSliceAssumeCapacity(src);
+                    for (region.width..stride) |_| {
+                        bitmaps.appendAssumeCapacity(0);
+                    }
+                }
+            } else {
+                ginfos[index] = c.xcb_render_glyphinfo_t{
+                    .x = 0,
+                    .y = 0,
+                    .width = 0,
+                    .height = 0,
+                    .x_off = @as(i16, @intCast(glyph_info.advance_x)),
+                    .y_off = @as(i16, @intCast(glyph_info.advance_y)),
+                };
+            }
+
+            total_advance.x += glyph_info.advance_x;
+            total_advance.y += glyph_info.advance_y;
+            index += 1;
+        }
+
+        if (index > 0 and bitmaps.items.len > 0) {
+            const cookie = c.xcb_render_add_glyphs_checked(
+                self.conn,
+                gs,
+                @intCast(index),
+                gids.ptr,
+                ginfos.ptr,
+                @intCast(bitmaps.items.len),
+                bitmaps.items.ptr,
+            );
+            if (c.xcb_request_check(self.conn, cookie)) |err| {
+                std.log.err("Failed to add glyphs: error_code={}", .{err.*.error_code});
+                return error.GlyphAddFailed;
+            }
+            _ = c.xcb_flush(self.conn);
         }
 
         return .{ .glyphset = gs, .advance = total_advance };
@@ -1003,7 +1199,8 @@ pub const XRenderFont = struct {
 
         for (0..@as(usize, @intCast(ginfo.height))) |y| {
             if (bitmap.*.buffer) |buf| {
-                @memcpy(
+                util.copyBytes(
+                    u8,
                     tmpbitmap[y * @as(usize, @intCast(stride)) ..][0..@as(usize, @intCast(ginfo.width))],
                     buf[@as(usize, @intCast(y * bitmap.*.width))..][0..@as(usize, @intCast(ginfo.width))],
                 );
@@ -1057,7 +1254,8 @@ pub const XRenderFont = struct {
 
         for (0..@as(usize, @intCast(ginfo.height))) |y| {
             if (bitmap.*.buffer) |buf| {
-                @memcpy(
+                util.copyBytes(
+                    u8,
                     tmpbitmap[y * @as(usize, @intCast(stride)) ..][0..@as(usize, @intCast(ginfo.width))],
                     buf[@as(usize, @intCast(y * bitmap.*.width))..][0..@as(usize, @intCast(ginfo.width))],
                 );
@@ -1070,10 +1268,6 @@ pub const XRenderFont = struct {
             return error.PictureCreationFailed;
         }
         _ = c.xcb_flush(self.conn);
-
-        // std.log.debug("Loaded fallback glyph U+{x:0>4}: width={}, height={}, x_off={}, y_off={}", .{
-        //     charcode, ginfo.width, ginfo.height, ginfo.x_off, ginfo.y_off,
-        // });
 
         return glyph_advance;
     }
