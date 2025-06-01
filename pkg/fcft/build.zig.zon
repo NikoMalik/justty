@@ -1,0 +1,14 @@
+.{
+    .name = .fcft,
+    .version = "0.0.0",
+    .fingerprint = 0x11577bbe4cb4e2d2,
+    .paths = .{""},
+    .dependencies = .{
+        .fcft = .{
+            .url = "git+https://codeberg.org/dnkl/fcft#0447e315291df724645b8128f26decdbc61ddcba",
+            .hash = "N-V-__8AADV4LgCaaHTcbDrQAxQGscsr85LFosFrR8R3-iOI",
+        },
+
+        .utf8proc = .{ .path = "../utf8proc", .lazy = true },
+    },
+}

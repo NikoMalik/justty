@@ -1,0 +1,7 @@
+.{
+    .name = .utf8proc,
+    .version = "2.8.0",
+    .fingerprint = 0xdcddf08d19d92d8c,
+    .paths = .{""},
+    .dependencies = .{},
+}
