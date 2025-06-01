@@ -1,0 +1,14 @@
+.{
+    .name = .fontconfig,
+    .version = "0.0.0",
+    .fingerprint = 0x4a79a5acd38d418,
+    .paths = .{""},
+    .dependencies = .{
+        .fontconfig = .{
+            .url = "https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.16.2.tar.gz",
+            .hash = "N-V-__8AAP6mKwAMQBkKS5bp9GC28WHDzQ7YAVsZ1xxLdAgp",
+        },
+
+        .freetype = .{ .path = "../freetype2", .lazy = true },
+    },
+}

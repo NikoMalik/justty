@@ -1,0 +1,8 @@
+.{
+    .name = .brotli,
+    .version = "0.0.0",
+    .fingerprint = 0xba7766d353029039,
+
+    .paths = .{""},
+    .dependencies = .{},
+}

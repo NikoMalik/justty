@@ -1,0 +1,24 @@
+.{
+    .name = .harfbuzz,
+    .version = "0.0.0",
+    .fingerprint = 0xbd60917c637e698f,
+    .paths = .{""},
+    .dependencies = .{
+        .harfbuzz = .{
+            .url = "git+https://github.com/harfbuzz/harfbuzz#5cebdd670cf11c57632f411c94456d7650b484a7",
+            .hash = "N-V-__8AAFbAhQXznIqSPUIGhU9oD9ocMXYEqFElecvphe8C",
+        },
+        .freetype = .{
+            .path = "../freetype2",
+            .lazy = true,
+        },
+        // .zlib = .{
+        //     .path = "../zlib",
+        //     .lazy = true,
+        // },
+        // .brotli = .{
+        //     .path = "../brotli",
+        //     .lazy = true,
+        // },
+    },
+}

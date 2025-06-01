@@ -1,0 +1,12 @@
+.{
+    .name = .zlib,
+    .version = "0.0.0",
+    .fingerprint = 0x73887d3aeac1bde9,
+    .dependencies = .{},
+    .paths = .{
+        "LICENSE",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+    },
+}

@@ -5,6 +5,15 @@
     .dependencies = .{
         .simdutf = .{ .path = "./pkg/simdutf", .lazy = true },
         .highway = .{ .path = "./pkg/highway", .lazy = true },
+        .fcft = .{ .path = "./pkg/fcft", .lazy = true },
+        .freetype = .{ .path = "./pkg/freetype2", .lazy = true },
+        .harfbuzz = .{ .path = "./pkg//harfbuzz", .lazy = true },
+        .fontconfig = .{ .path = "./pkg/fontconfig", .lazy = true },
+        .pixman = .{ .path = "./pkg/pixman", .lazy = true },
+
+        .utf8proc = .{ .path = "./pkg/utf8proc", .lazy = true },
+        .zlib = .{ .path = "./pkg/zlib", .lazy = true },
+        .brotli = .{ .path = "./pkg/brotli", .lazy = true },
     },
 
     .paths = .{

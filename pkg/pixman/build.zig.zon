@@ -1,0 +1,7 @@
+.{
+    .name = .pixman,
+    .version = "0.0.0",
+    .fingerprint = 0x16aa7fe725484815,
+    .paths = .{""},
+    .dependencies = .{},
+}

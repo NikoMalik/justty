@@ -17,6 +17,9 @@ pub fn build(b: *std.Build) !void {
     try flags.appendSlice(&.{
         "-O3",
         "-march=native",
+        "-ffunction-sections",
+        "-fdata-sections",
+        "-flto",
         "-DUTF8PROC_EXPORTS",
         "-std=c99",
     });

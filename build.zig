@@ -24,8 +24,10 @@ fn addDep(
     artifact.addIncludePath(b.path("./config/"));
     artifact.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
 
-    artifact.linkSystemLibrary("freetype2");
-    artifact.linkSystemLibrary("fontconfig");
+    // artifact.linkSystemLibrary("freetype2");
+    // artifact.linkSystemLibrary("fontconfig");
+    // artifact.linkSystemLibrary("harfbuzz");
+    // artifact.linkSystemLibrary("pixman-1");
     artifact.linkSystemLibrary("xcb");
     artifact.linkSystemLibrary("xinerama");
     artifact.linkSystemLibrary("xcb-cursor");
@@ -34,6 +36,7 @@ fn addDep(
     artifact.linkSystemLibrary("xkbcommon");
     artifact.linkSystemLibrary("xcb-renderutil");
     artifact.linkSystemLibrary("xcb-xrm");
+    artifact.linkSystemLibrary2("expat", .{ .preferred_link_mode = .static });
 
     artifact.linkLibCpp();
     artifact.linkLibC();
@@ -69,36 +72,100 @@ fn addDep(
         },
     });
 
-    if (b.systemIntegrationOption("simdutf", .{})) {
-        artifact.linkSystemLibrary2("simdutf", .{});
-    } else {
-        if (b.lazyDependency("simdutf", .{
-            .target = target,
-            .optimize = optimize,
-        })) |simdutf_dep| {
-            artifact.linkLibrary(simdutf_dep.artifact("simdutf"));
-            artifact.addIncludePath(simdutf_dep.path("vendor"));
-        }
+    // if (b.systemIntegrationOption("simdutf", .{})) {
+    //     artifact.linkSystemLibrary2("simdutf", .{});
+    // } else {
+    if (b.lazyDependency("simdutf", .{
+        .target = target,
+        .optimize = optimize,
+    })) |simdutf_dep| {
+        artifact.linkLibrary(simdutf_dep.artifact("simdutf"));
+        artifact.addIncludePath(simdutf_dep.path("vendor"));
     }
 
-    if (b.systemIntegrationOption("highway", .{})) {
-        artifact.linkSystemLibrary2("highway", .{});
-    } else {
-        if (b.lazyDependency("highway", .{
-            .target = target,
-            .optimize = optimize,
-        })) |highway_dep| {
-            artifact.linkLibrary(highway_dep.artifact("highway"));
-            artifact.addIncludePath(highway_dep.path("hwy"));
-        }
+    if (b.lazyDependency("brotli", .{
+        .target = target,
+        .optimize = optimize,
+    })) |brotli_dep| {
+        artifact.linkLibrary(brotli_dep.artifact("brotli"));
+        artifact.addIncludePath(brotli_dep.path("upstream/c"));
+        artifact.addIncludePath(brotli_dep.path("upstream/c/include"));
     }
+
+    if (b.lazyDependency("zlib", .{
+        .target = target,
+        .optimize = optimize,
+    })) |zlib_dep| {
+        artifact.linkLibrary(zlib_dep.artifact("z"));
+    }
+
+    if (b.lazyDependency("freetype", .{
+        .target = target,
+        .optimize = optimize,
+    })) |freetype_dep| {
+        artifact.linkLibrary(freetype_dep.artifact("freetype"));
+        artifact.addIncludePath(freetype_dep.path("upstream"));
+
+        artifact.addIncludePath(freetype_dep.path("upstream/include"));
+    }
+
+    if (b.lazyDependency("harfbuzz", .{
+        .target = target,
+        .optimize = optimize,
+    })) |harfbuzz_dep| {
+        artifact.linkLibrary(harfbuzz_dep.artifact("harfbuzz"));
+    }
+
+    if (b.lazyDependency("fontconfig", .{
+        .target = target,
+        .optimize = optimize,
+    })) |fontconfig_dep| {
+        artifact.linkLibrary(fontconfig_dep.artifact("fontconfig"));
+        artifact.addIncludePath(fontconfig_dep.path("override/include"));
+        artifact.addIncludePath(fontconfig_dep.path("upstream/"));
+    }
+
+    if (b.lazyDependency("pixman", .{
+        .target = target,
+        .optimize = optimize,
+    })) |pixman_dep| {
+        artifact.linkLibrary(pixman_dep.artifact("pixman"));
+        artifact.addIncludePath(pixman_dep.path("upstream"));
+        artifact.addIncludePath(pixman_dep.path("upstream/pixman"));
+        artifact.addIncludePath(pixman_dep.path("include"));
+    }
+
+    // }
+
+    // if (b.systemIntegrationOption("highway", .{})) {
+    //     artifact.linkSystemLibrary2("highway", .{});
+    // } else {
+    if (b.lazyDependency("highway", .{
+        .target = target,
+        .optimize = optimize,
+    })) |highway_dep| {
+        artifact.linkLibrary(highway_dep.artifact("highway"));
+        artifact.addIncludePath(highway_dep.path("hwy"));
+    }
+    // }
+
+    // if (b.systemIntegrationOption("fcft", .{})) {
+    //     artifact.linkSystemLibrary2("fcft", .{});
+    // } else {
+    if (b.lazyDependency("fcft", .{
+        .target = target,
+        .optimize = optimize,
+    })) |fcft_dep| {
+        artifact.linkLibrary(fcft_dep.artifact("fcft"));
+        artifact.addIncludePath(fcft_dep.path("fcft"));
+        artifact.addIncludePath(fcft_dep.path(""));
+    }
+    // }
 }
 
 comptime {
     requireZig("0.14.0");
 }
-
-const prefix = "/usr/local";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -114,83 +181,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .optimize = optimize,
     });
-    exe.linkLibCpp();
-    const HWY_AVX3_SPR: c_int = 1 << 4;
-    const HWY_AVX3_ZEN4: c_int = 1 << 6;
-    const HWY_AVX3_DL: c_int = 1 << 7;
-    const HWY_AVX3: c_int = 1 << 8;
+    addDep(exe, b, target, optimize);
 
-    const HWY_DISABLED_TARGETS: c_int = HWY_AVX3_SPR | HWY_AVX3_ZEN4 | HWY_AVX3_DL | HWY_AVX3;
-
-    exe.addCSourceFiles(.{
-        .files = &.{
-            "justty_simdutf.cpp",
-        },
-        .flags = if (exe.rootModuleTarget().cpu.arch == .x86_64) &.{
-            b.fmt("-DHWY_DISABLED_TARGETS={}", .{HWY_DISABLED_TARGETS}),
-            "-O3",
-            "-march=native",
-            "-flto",
-            "-fno-exceptions",
-            "-DNDEBUG",
-            "-std=c++17",
-            "-ffunction-sections",
-            "-fdata-sections",
-        } else &.{
-            "-O3",
-            "-march=native",
-            "-flto",
-            "-fno-exceptions",
-            "-DNDEBUG",
-            "-std=c++17",
-            "-ffunction-sections",
-            "-fdata-sections",
-        },
-    });
-
-    if (b.systemIntegrationOption("highway", .{})) {
-        exe.linkSystemLibrary2("highway", .{});
-    } else {
-        if (b.lazyDependency("highway", .{
-            .target = target,
-            .optimize = optimize,
-        })) |highway_dep| {
-            exe.linkLibrary(highway_dep.artifact("highway"));
-            exe.addIncludePath(highway_dep.path("hwy"));
-        }
-    }
-
-    if (b.systemIntegrationOption("simdutf", .{})) {
-        exe.linkSystemLibrary2("simdutf", .{});
-    } else {
-        if (b.lazyDependency("simdutf", .{
-            .target = target,
-            .optimize = optimize,
-        })) |simdutf_dep| {
-            exe.linkLibrary(simdutf_dep.artifact("simdutf"));
-            exe.addIncludePath(simdutf_dep.path("vendor"));
-        }
-    }
-
-    exe.addIncludePath(b.path("./include/"));
-    exe.addIncludePath(b.path("./config/"));
-    exe.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-    exe.linkSystemLibrary("freetype2");
-    exe.linkSystemLibrary("fontconfig");
-    // exe.linkSystemLibrary("X11");
-    exe.linkSystemLibrary("xinerama");
-    exe.linkSystemLibrary("xkbcommon");
-
-    exe.linkSystemLibrary("xcb");
-    // exe.linkSystemLibrary2("freetype2", .{});
-    exe.linkSystemLibrary("xcb-cursor");
-    exe.linkSystemLibrary("xcb-keysyms");
-    exe.linkSystemLibrary("xcb-render");
-    exe.linkSystemLibrary("xcb-renderutil");
-    exe.linkSystemLibrary("xcb-xrm");
-
-    // exe.linkSystemLibrary("freetype");
-    // exe.linkSystemLibrary("Xft");
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
 

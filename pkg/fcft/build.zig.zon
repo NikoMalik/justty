@@ -10,5 +10,9 @@
         },
 
         .utf8proc = .{ .path = "../utf8proc", .lazy = true },
+        .freetype = .{ .path = "../freetype2", .lazy = true },
+        .harfbuzz = .{ .path = "../harfbuzz", .lazy = true },
+        .fontconfig = .{ .path = "../fontconfig", .lazy = true },
+        .pixman = .{ .path = "../pixman", .lazy = true },
     },
 }

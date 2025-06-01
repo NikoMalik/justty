@@ -6,7 +6,26 @@ pub fn build(b: *std.Build) !void {
 
     const upstream = b.dependency("fcft", .{});
 
-    const utf8proc_dep = b.lazyDependency("utf8proc", .{});
+    const utf8proc_dep = b.lazyDependency("utf8proc", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const pixman_dep = b.lazyDependency("pixman", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const fontconfig_dep = b.lazyDependency("fontconfig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const freetype_dep = b.lazyDependency("freetype", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const harfbuzz_dep = b.lazyDependency("harfbuzz", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const generate_emoji = b.addSystemCommand(&.{
         "python3",
@@ -17,16 +36,15 @@ pub fn build(b: *std.Build) !void {
     const generate_unicode = b.addSystemCommand(&.{
         "env",
         "LC_ALL=C",
-        upstream.path("generate-unicode-precompose.sh").getPath(b),
-        upstream.path("UnicodeData.txt").getPath(b),
+        b.pathFromRoot("generate-unicode-precompose.sh"),
+        b.pathFromRoot("UnicodeData.txt"),
     });
-
     const generate_version = b.addSystemCommand(&.{
         "env",
         "LC_ALL=C",
-        upstream.path("generate-version.sh").getPath(b),
+        b.pathFromRoot("generate-version.sh"),
         "3.3.1",
-        upstream.path("").getPath(b),
+        b.pathFromRoot(""),
     });
     const version_h = generate_version.addOutputFileArg("version.h");
 
@@ -51,17 +69,37 @@ pub fn build(b: *std.Build) !void {
 
     // pixman
 
-    lib.linkSystemLibrary("pixman-1");
-    lib.linkSystemLibrary("freetype2");
-    lib.linkSystemLibrary("harfbuzz");
-    lib.linkSystemLibrary("fontconfig");
+    // lib.linkSystemLibrary("pixman-1"); // done static
+    // lib.linkSystemLibrary("freetype2"); //done static
+    // lib.linkSystemLibrary("harfbuzz"); //done static
+    // lib.linkSystemLibrary("fontconfig"); // done static
+    lib.linkLibrary(pixman_dep.?.artifact("pixman"));
+    lib.addIncludePath(pixman_dep.?.path("upstream"));
+    lib.addIncludePath(pixman_dep.?.path("upstream/pixman"));
+    lib.addIncludePath(pixman_dep.?.path("include"));
+
+    lib.linkLibrary(freetype_dep.?.artifact("freetype"));
+    lib.addIncludePath(freetype_dep.?.path("upstream"));
+    lib.addIncludePath(freetype_dep.?.path("upstream/include"));
+
+    lib.linkLibrary(harfbuzz_dep.?.artifact("harfbuzz"));
+
+    lib.linkLibrary(fontconfig_dep.?.artifact("fontconfig"));
+    lib.addIncludePath(fontconfig_dep.?.path("override/include"));
+    lib.addIncludePath(fontconfig_dep.?.path("upstream/"));
+
     lib.linkLibrary(utf8proc_dep.?.artifact("utf8proc"));
-    // if (utf8proc_dep.found()) lib.linkLibrary(utf8proc_dep.artifact("libutf8proc"));
+    lib.addIncludePath(utf8proc_dep.?.path("upstream"));
     var flags = std.ArrayList([]const u8).init(b.allocator);
     defer flags.deinit();
     try flags.appendSlice(&.{
         "-O3",
         "-march=native",
+
+        "-flto",
+        "-ffunction-sections",
+        "-fdata-sections",
+
         "-D_GNU_SOURCE=200809L",
         "-DFCFT_HAVE_HARFBUZZ",
         "-DFCFT_HAVE_UTF8PROC",
