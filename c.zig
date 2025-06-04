@@ -1,22 +1,31 @@
 pub usingnamespace @cImport({
     @cInclude("sys/ioctl.h");
+    @cInclude("sys/select.h");
+    @cInclude("sys/stat.h");
+    // @cInclude("sys/shm.h");
+    @cInclude("sys/mman.h");
     @cInclude("xcb/xcb.h");
     @cInclude("xcb/xcb_cursor.h");
     @cInclude("xcb/xcb_keysyms.h");
     @cInclude("xkbcommon/xkbcommon.h");
+    @cInclude("xcb/xcb_image.h");
     @cInclude("xcb/xcb_renderutil.h");
     @cInclude("xcb/xcb_xrm.h");
     @cInclude("xcb/render.h");
+    @cInclude("pixman.h");
     @cInclude("locale.h");
     @cInclude("config.h");
-    @cInclude("ft2build.h");
+    // @cInclude("ft2build.h");
     @cInclude("fontconfig/fontconfig.h");
     // @cInclude("X11/Xlib-xcb.h");
     @cInclude("freetype/ftmm.h");
     @cInclude("freetype/ftoutln.h");
     @cInclude("freetype/ftsnames.h");
     @cInclude("freetype/ttnameid.h");
-    @cInclude("sys/select.h");
+
+    //fcft
+    // @cInclude("fcft/stride.h");
+    // @cInclude("fcft/fcft.h");
 });
 
 //     for (data) |byte| {

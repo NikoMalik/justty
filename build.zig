@@ -36,6 +36,7 @@ fn addDep(
     artifact.linkSystemLibrary("xkbcommon");
     artifact.linkSystemLibrary("xcb-renderutil");
     artifact.linkSystemLibrary("xcb-xrm");
+    artifact.linkSystemLibrary("xcb-shm");
     artifact.linkSystemLibrary2("expat", .{ .preferred_link_mode = .static });
 
     artifact.linkLibCpp();

@@ -6,6 +6,10 @@ pub fn maxLen(input: []const u8) usize {
     return simd_base64_max_length(input.ptr, input.len);
 }
 
+pub inline fn safeClamp(val: anytype, lower: anytype, upper: anytype) @TypeOf(val, lower, upper) {
+    return std.math.clamp(val, lower, upper);
+}
+
 pub inline fn safeLongToI16(value: c_long) !i16 {
     return if (value > std.math.maxInt(i16))
         error.Overflow
@@ -22,6 +26,76 @@ pub inline fn safeCast(c_ulong_val: c_ulong) !i16 {
         error.Underflow
     else
         @intCast(c_ulong_val);
+}
+
+pub fn isAscii(input: []const u8) bool {
+    var remain = input;
+    if (comptime std.simd.suggestVectorLength(u8)) |vector_len| {
+        while (remain.len > vector_len) {
+            const chunk: @Vector(vector_len, u8) = remain[0..vector_len].*;
+            if (@reduce(.Max, chunk) < 128) {
+                return true;
+            }
+            remain = remain[vector_len..];
+        }
+    }
+    for (remain) |c| {
+        if (c < 128) {
+            return true;
+        }
+    }
+    return false;
+}
+
+test "isAscii with all ASCII characters" {
+    const testing = std.testing;
+    const input = "Hello, World! 123";
+    try testing.expect(isAscii(input) == true); // All characters are ASCII (< 128)
+}
+
+test "isAscii with mixed ASCII and non-ASCII characters" {
+    const testing = std.testing;
+
+    const input = "Hello, 世界!";
+    try testing.expect(isAscii(input) == true); // Contains ASCII characters (e.g., 'H', 'e')
+}
+
+test "isAscii with all non-ASCII characters" {
+    const testing = std.testing;
+
+    const input = "世界你好"; // All characters >= 128
+    try testing.expect(isAscii(input) == false); // No ASCII characters
+}
+
+test "isAscii with single ASCII character" {
+    const testing = std.testing;
+
+    try testing.expect(isAscii("A") == true); // Single ASCII character
+}
+
+test "isAscii with single non-ASCII character" {
+    const testing = std.testing;
+
+    try testing.expect(isAscii("世") == false); // Single non-ASCII character
+}
+
+test "isAscii with boundary ASCII value (127)" {
+    const testing = std.testing;
+
+    try testing.expect(isAscii("\x7F") == true); // 127 is the highest ASCII value
+}
+
+test "isAscii with boundary non-ASCII value (128)" {
+    const testing = std.testing;
+
+    try testing.expect(isAscii("\x80") == false); // 128 is non-ASCII
+}
+
+test "isAscii with long ASCII input" {
+    const testing = std.testing;
+
+    const input = "a" ** 100; // 100 ASCII characters
+    try testing.expect(isAscii(input) == true);
 }
 
 pub inline fn maskbase(m: u32) i16 {
