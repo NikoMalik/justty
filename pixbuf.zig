@@ -25,8 +25,7 @@ const Container = struct {
     height: u16,
 };
 
-const Buf = struct {
-    id: posix.fd_t,
+pub const Buf = struct {
     allocator: Allocator,
     conn: *c.xcb_connection_t,
     screen: *c.xcb_screen_t,
@@ -36,14 +35,37 @@ const Buf = struct {
     y: f32,
     width: u16,
     height: u16,
-    px: [*]u32,
+    size: u32,
+    // px: [*]u32,
     pixman_image: *c.pixman_image_t,
-    mapped: *anyopaque,
+    // mapped: *anyopaque,
+    mapped: []align(std.heap.page_size_min) u8,
 
     is_shm: bool,
     shm: sh,
 
     const Self = @This();
+
+    const MFD_NOEXEC_SEAL: u32 = if (@hasDecl(linux.MFD, "NOEXEC_SEAL"))
+        linux.MFD.NOEXEC_SEAL
+    else
+        0x0008; // linux 6.3
+    const F_ADD_SEALS = if (@hasDecl(posix.F, "ADD_SEALS"))
+        posix.F.ADD_SEALS
+    else
+        1025;
+    const F_SEAL_GROW = if (@hasDecl(posix.F, "SEAL_GROW"))
+        posix.F.SEAL_GROW
+    else
+        0x0004;
+    const F_SEAL_SHRINK = if (@hasDecl(posix.F, "SEAL_SHRINK"))
+        posix.F.SEAL_SHRINK
+    else
+        0x0002;
+    const F_SEAL_SEAL = if (@hasDecl(posix.F, "SEAL_SEAL"))
+        posix.F.SEAL_SEAL
+    else
+        0x0008;
 
     pub fn init(
         allocator: Allocator,
@@ -54,7 +76,7 @@ const Buf = struct {
         h: u16,
     ) !Self {
         const gc = c.xcb_generate_id(conn);
-        const stride = strideForFormatAndWidth(c.PIXMAN_x8r8g8b8, w);
+        const stride = try strideForFormatAndWidth(c.PIXMAN_x8r8g8b8, w);
         const size = stride * h;
 
         _ = c.xcb_create_gc(conn, gc, container, 0, null);
@@ -66,15 +88,18 @@ const Buf = struct {
             shm_seg = c.xcb_generate_id(conn);
             pixmap = c.xcb_generate_id(conn);
 
-            var pool_fd = c.memfd_create(
+            const flags = linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING |
+                MFD_NOEXEC_SEAL;
+
+            var pool_fd = linux.memfd_create(
                 "justty-shm",
-                c.MFD_CLOEXEC | c.MFD_ALLOW_SEALING | c.MFD_NOEXEC_SEAL,
+                flags,
             );
 
             if (pool_fd < 0) {
-                pool_fd = c.memfd_create(
+                pool_fd = linux.memfd_create(
                     "justty-shm",
-                    c.MFD_CLOEXEC | c.MFD_ALLOW_SEALING,
+                    posix.MFD.CLOEXEC | posix.MFD.ALLOW_SEALING,
                 );
             }
             // const pool_fd = posix.memfd_create("justty-shm",  linux.MFD.ALLOW_SEALING | linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING );
@@ -82,26 +107,27 @@ const Buf = struct {
                 std.log.err("Failed to set SHM size: {}", .{std.c._errno(pool_fd)});
                 return error.ShmTruncateFailed;
             }
-            errdefer posix.close(pool_fd);
+            errdefer _ = linux.close(@intCast(pool_fd));
             const mmapped = posix.mmap(
                 null,
                 size,
                 posix.PROT.READ | posix.PROT.WRITE,
                 .{ .TYPE = .SHARED, .UNINITIALIZED = true },
-                pool_fd,
+                @intCast(pool_fd),
                 0,
             ) catch |err| {
                 std.log.err("Failed to mmap SHM: {}", .{err});
                 return error.MmapFailed;
             };
-            errdefer if (mmapped != null) posix.munmap(mmapped);
+            errdefer posix.munmap(mmapped);
             //seal shm memory
-            _ = try posix.fcntl(
-                pool_fd,
-                posix.F.ADD_SEALS,
-                posix.F.SEAL_GROW | posix.F.SEAL_SHRINK | posix.F.SEAL_SEAL,
-            );
-
+            _ = posix.fcntl(
+                @intCast(pool_fd),
+                F_ADD_SEALS,
+                F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL,
+            ) catch |err| {
+                std.log.warn("Failed to seal SHM: {}", .{err});
+            };
             _ = c.xcb_shm_attach_fd(conn, shm_seg, @intCast(pool_fd), 0);
             _ = c.xcb_shm_create_pixmap(
                 conn,
@@ -120,7 +146,7 @@ const Buf = struct {
                 @ptrCast(mmapped),
                 @intCast(stride),
             );
-            errdefer c.pixman_image_unref(pix);
+            errdefer _ = c.pixman_image_unref(pix);
             if (pix == null) {
                 std.log.err("Failed to create pixman image", .{});
                 return error.PixmanImageCreateFailed;
@@ -136,16 +162,19 @@ const Buf = struct {
                 .y = 0.0,
                 .width = w,
                 .height = h,
-                .px = @ptrCast(mmapped.?),
-                .pixman_image = pix,
-                .mapped = mmapped.?,
+                // .px = @ptrCast(mmapped),
+                .pixman_image = pix.?,
+                .mapped = mmapped, // []align(4096) u8
                 .is_shm = true,
-                .shm = sh.base{
-                    .seg = shm_seg,
-                    .pixmap = pixmap,
+                .shm = .{
+                    .base = .{
+                        .id = @intCast(pool_fd),
+                        .seg = shm_seg,
+                        .pixmap = pixmap,
+                    },
                 },
                 // .image = image,
-                .stride = stride,
+                // .stride = stride,
                 .size = size,
             };
         } else {
@@ -163,7 +192,7 @@ const Buf = struct {
                 h,
             );
 
-            const data = try allocator.alignedAlloc(u32, 4, size);
+            const data = try allocator.alignedAlloc(u8, std.heap.page_size_min, size);
             errdefer allocator.free(data);
 
             const pix = c.pixman_image_create_bits_no_clear(
@@ -194,21 +223,49 @@ const Buf = struct {
                 .y = 0.0,
                 .width = w,
                 .height = h,
-                .px = @ptrCast(data.ptr),
+                // .px = @ptrCast(data.ptr),
                 .pixman_image = pix,
                 .mapped = data,
                 .is_shm = false,
                 .shm = .{ .no_base = .{ .image = image } },
-                .stride = stride,
+                // .stride = stride,
                 .size = size,
             };
         }
     }
 
+    pub fn draw(self: *Self) !void {
+        if (self.is_shm) {
+            _ = c.xcb_copy_area(
+                self.conn,
+                self.shm.shm.pixmap,
+                self.container.drawable,
+                self.gc,
+                0,
+                0,
+                @intFromFloat(self.x),
+                @intFromFloat(self.y),
+                self.width,
+                self.height,
+            );
+        } else {
+            _ = c.xcb_image_put(
+                self.conn,
+                self.container.drawable,
+                self.gc,
+                self.shm.no_base.image,
+                @intFromFloat(self.x),
+                @intFromFloat(self.y),
+                0,
+            );
+        }
+        _ = c.xcb_flush(self.conn);
+    }
+
     pub fn deinit(self: *Self) void {
         c.pixman_image_unref(self.pixman_image);
         if (self.is_shm) {
-            posix.munmap(self.mapped.ptr, self.size) catch {};
+            posix.munmap(self.mapped);
             _ = c.xcb_shm_detach(self.conn, self.shm.shm.seg);
             _ = c.xcb_free_pixmap(self.conn, self.shm.shm.pixmap);
             posix.close(self.shm.shm.id);
@@ -219,30 +276,17 @@ const Buf = struct {
         _ = c.xcb_free_gc(self.conn, self.gc);
     }
 
-    pub fn is_shm_available(conn: *c.xcb_connection_t) bool {
+    fn is_shm_available(conn: *c.xcb_connection_t) bool {
         const cookie = c.xcb_shm_query_version(conn);
-        const e = c.xcb_request_check(conn, cookie);
-        if (e != null) {
-            std.log.err("ERROR: {}", .{e.*.error_code});
-            c.xcb_disconnect(conn);
-            std.process.exit(1);
-        }
-        const reply = c.xcb_shm_query_version_reply(
-            conn,
-            cookie,
-            e,
-        );
-        defer std.c.free(e);
-        defer std.c.free(reply);
-        if (reply == null or reply.*.shared_pixmaps == 0) {
-            return false;
-        }
-        return true;
+        const reply = c.xcb_shm_query_version_reply(conn, cookie, null);
+        defer if (reply != null) std.c.free(reply);
+        return reply != null and reply.*.shared_pixmaps != 0;
     }
 };
 
 const sh = union {
     base: struct {
+        id: posix.fd_t,
         seg: c.xcb_shm_seg_t,
         pixmap: c.xcb_pixmap_t,
     },

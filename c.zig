@@ -1,9 +1,8 @@
 pub usingnamespace @cImport({
     @cInclude("sys/ioctl.h");
-    @cInclude("sys/select.h");
-    @cInclude("sys/stat.h");
-    // @cInclude("sys/shm.h");
     @cInclude("sys/mman.h");
+    @cInclude("sys/select.h");
+    @cInclude("sys/stat.h"); // @cInclude("sys/shm.h");
     @cInclude("xcb/xcb.h");
     @cInclude("xcb/xcb_cursor.h");
     @cInclude("xcb/xcb_keysyms.h");
