@@ -19,6 +19,7 @@ pub inline fn strideForFormatAndWidth(format: c.pixman_format_code_t, width: u16
     }
     return @intCast(aligned);
 }
+
 const Container = struct {
     drawable: c.xcb_drawable_t,
     width: u16,
@@ -31,11 +32,11 @@ pub const Buf = struct {
     screen: *c.xcb_screen_t,
     gc: c.xcb_gcontext_t,
     container: Container,
-    x: f32,
-    y: f32,
+    x: i16,
+    y: i16,
     width: u16,
     height: u16,
-    size: u32,
+    size: usize,
     // px: [*]u32,
     pixman_image: *c.pixman_image_t,
     // mapped: *anyopaque,
@@ -77,8 +78,7 @@ pub const Buf = struct {
     ) !Self {
         const gc = c.xcb_generate_id(conn);
         const stride = try strideForFormatAndWidth(c.PIXMAN_x8r8g8b8, w);
-        const size = stride * h;
-
+        const size: usize = @as(usize, @intCast(stride)) * @as(usize, @intCast(h));
         _ = c.xcb_create_gc(conn, gc, container, 0, null);
         var is_shm = false;
         var shm_seg: c.xcb_shm_seg_t = 0;
@@ -143,7 +143,7 @@ pub const Buf = struct {
                 c.PIXMAN_a8r8g8b8,
                 @intCast(w),
                 @intCast(h),
-                @ptrCast(mmapped),
+                @ptrCast(mmapped.ptr),
                 @intCast(stride),
             );
             errdefer _ = c.pixman_image_unref(pix);
@@ -162,7 +162,6 @@ pub const Buf = struct {
                 .y = 0.0,
                 .width = w,
                 .height = h,
-                // .px = @ptrCast(mmapped),
                 .pixman_image = pix.?,
                 .mapped = mmapped, // []align(4096) u8
                 .is_shm = true,
@@ -235,16 +234,71 @@ pub const Buf = struct {
     }
 
     pub fn draw(self: *Self) !void {
+        const cont_w = self.container.width;
+        const cont_h = self.container.height;
+
+        // Clear top
+        if (self.y > 0) {
+            _ = c.xcb_clear_area(
+                self.conn,
+                0,
+                self.container.drawable,
+                0,
+                0,
+                cont_w,
+                @intCast(self.y),
+            );
+        }
+
+        // CLear reft side
+        if (self.x > 0) {
+            _ = c.xcb_clear_area(
+                self.conn,
+                0,
+                self.container.drawable,
+                0,
+                0,
+                @intCast(self.x),
+                cont_h,
+            );
+        }
+
+        // Clear bottom
+        if (@as(u16, @intCast(self.y)) + self.height < cont_h) {
+            _ = c.xcb_clear_area(
+                self.conn,
+                0,
+                self.container.drawable,
+                0,
+                self.y + @as(i16, @intCast(self.height)),
+                cont_w,
+                cont_h - (@as(u16, @intCast(self.y)) + self.height),
+            );
+        }
+
+        // Clear RIght side
+        if (@as(u16, @intCast(self.x)) + self.width < cont_w) {
+            _ = c.xcb_clear_area(
+                self.conn,
+                0,
+                self.container.drawable,
+                self.x + @as(i16, @intCast(self.width)),
+                0,
+                cont_w - @as(u16, @intCast(self.x)) + self.width,
+                cont_h,
+            );
+        }
+
         if (self.is_shm) {
             _ = c.xcb_copy_area(
                 self.conn,
-                self.shm.shm.pixmap,
+                self.shm.base.pixmap,
                 self.container.drawable,
                 self.gc,
                 0,
                 0,
-                @intFromFloat(self.x),
-                @intFromFloat(self.y),
+                self.x,
+                self.y,
                 self.width,
                 self.height,
             );
@@ -254,8 +308,8 @@ pub const Buf = struct {
                 self.container.drawable,
                 self.gc,
                 self.shm.no_base.image,
-                @intFromFloat(self.x),
-                @intFromFloat(self.y),
+                self.x,
+                self.y,
                 0,
             );
         }
@@ -263,12 +317,12 @@ pub const Buf = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        c.pixman_image_unref(self.pixman_image);
+        _ = c.pixman_image_unref(self.pixman_image);
         if (self.is_shm) {
             posix.munmap(self.mapped);
-            _ = c.xcb_shm_detach(self.conn, self.shm.shm.seg);
-            _ = c.xcb_free_pixmap(self.conn, self.shm.shm.pixmap);
-            posix.close(self.shm.shm.id);
+            _ = c.xcb_shm_detach(self.conn, self.shm.base.seg);
+            _ = c.xcb_free_pixmap(self.conn, self.shm.base.pixmap);
+            posix.close(self.shm.base.id);
         } else {
             self.allocator.free(self.mapped);
             c.xcb_image_destroy(self.shm.no_base.image);
@@ -276,6 +330,57 @@ pub const Buf = struct {
         _ = c.xcb_free_gc(self.conn, self.gc);
     }
 
+    pub fn rect(self: *Self, x: i16, y: i16, w: i16, h: i16, color: u32) void {
+        var dx: i16 = 0;
+        var dy: i16 = 0;
+
+        var rect_x = x;
+        var rect_y = y;
+        var rect_w = w;
+        var rect_h = h;
+
+        if (rect_x < 0) {
+            rect_w += rect_x;
+            rect_x = 0;
+        }
+        if (rect_y < 0) {
+            rect_h += rect_y;
+            rect_y = 0;
+        }
+        if (rect_x + rect_w > self.width) {
+            rect_w = @intCast(self.width - @as(u16, @intCast(rect_x)));
+        }
+        if (rect_y + rect_h > self.height) {
+            rect_h = @intCast(self.height - @as(u16, @intCast(rect_y)));
+        }
+
+        if (rect_w <= 0 or rect_h <= 0) return;
+
+        const pixels: [*]u32 = @ptrCast(@alignCast(self.mapped.ptr));
+        while (dy < rect_h) : (dy += 1) {
+            dx = 0;
+            while (dx < rect_w) : (dx += 1) {
+                const px_idx = (@as(usize, @intCast(rect_y + dy)) * @as(usize, self.width)) + @as(usize, @intCast(rect_x + dx));
+                pixels[px_idx] = color;
+            }
+        }
+    }
+
+    pub fn clear(self: *Self, color: u32) void {
+        const pixels: [*]u32 = @ptrCast(@alignCast(self.mapped.ptr));
+        const total_pixels = @as(usize, self.width) * @as(usize, self.height);
+        @memset(pixels[0..total_pixels], color);
+    }
+
+    pub fn setContainerSize(self: *Self, cw: u16, ch: u16) void {
+        const dx: i32 = @divFloor(@as(i32, cw) - @as(i32, self.container.width), 2);
+        const dy: i32 = @divFloor(@as(i32, ch) - @as(i32, self.container.height), 2);
+        std.log.debug("Updating container size: cw={d}, ch={d}, dx={d}, dy={d}, new_x={d}, new_y={d}", .{ cw, ch, dx, dy, self.x + dx, self.y + dy });
+        self.x += @intCast(dx);
+        self.y += @intCast(dy);
+        self.container.width = cw;
+        self.container.height = ch;
+    }
     fn is_shm_available(conn: *c.xcb_connection_t) bool {
         const cookie = c.xcb_shm_query_version(conn);
         const reply = c.xcb_shm_query_version_reply(conn, cookie, null);

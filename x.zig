@@ -9,13 +9,15 @@ const data_structs = @import("datastructs.zig");
 const assert = std.debug.assert;
 const unicode = std.unicode;
 const Keysym = @import("keysym.zig");
-const font = @import("xcb_font.zig");
+// const font = @import("xcb_font.zig");
+const font = @import("fnt.zig");
 pub const vtiden: []const u8 = "\x1B[?6c"; // VT102 identification string
 pub const ascii_printable =
     \\ !\"#$%&'()*+,-./0123456789:;<=>?
     \\ @ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_
     \\ `abcdefghijklmnopqrstuvwxyz{|}~
 ;
+const Buf = @import("pixbuf.zig");
 
 const utf_size = 4;
 const esc_buf_size = 128 * utf_size;
@@ -1100,6 +1102,10 @@ const RenderColor = packed struct(u64) {
     pub inline fn cval(self: *RenderColor) *c.xcb_render_color_t {
         return @ptrCast(@alignCast(self));
     }
+
+    pub inline fn cval_pixman(self: *RenderColor) *c.pixman_color_t {
+        return @ptrCast(@alignCast(self));
+    }
 };
 
 const Color = packed struct(u96) {
@@ -1580,8 +1586,7 @@ pub const XlibTerminal = struct {
     pid: posix.pid_t,
     visual: VisualData,
     xrender_font: Font,
-    // ft: font.FreeType,
-    // fc: font.Fontconfig,
+    buf: Buf.Buf,
 
     dc: DC,
     term: Term, // Buffer to store pty output
@@ -1613,7 +1618,6 @@ pub const XlibTerminal = struct {
         const root = get_root_window(connection);
 
         //keysyms
-
         const keysyms = c.xcb_key_symbols_alloc(connection);
 
         const xkb_context = Keysym.Context.new(.no_flags) orelse return error.XkbContextNewFailed;
@@ -1629,33 +1633,25 @@ pub const XlibTerminal = struct {
         var xrender_font = try font.XRenderFont.init(connection, allocator, font_query[0..]);
         errdefer xrender_font.deinit();
         std.log.info("Font initialized: query={s}, dpi={d}", .{ font_query[0..], @as(u16, @intFromFloat(xrender_font.dpi)) });
-        const pixel_size = font.getPixelSize(xrender_font.pattern, xrender_font.dpi);
-        xrender_font.pattern.print();
-        // const metrics = face.handle.*.size.*.metrics;
-        const metrics = xrender_font.ft.face.?.*.size.*.metrics;
-        const cw = @as(u16, @intCast(metrics.x_ppem));
-        const ch = @as(u16, @intCast(metrics.y_ppem));
+
+        const cw = @as(u16, @intCast(xrender_font.font.max_advance.x));
+        const ch = @as(u16, @intCast(xrender_font.font.max_advance.y));
         if (cw > 72 or ch > 72) {
             std.log.err("Character size too large: cw={}, ch={}. Check font pixel size or DPI.", .{ cw, ch });
             return error.InvalidFontMetrics;
         }
 
-        if (cw < 6 or ch < 6) {
+        if (cw < 4 or ch < 4) {
             std.log.err("Character size too small: cw={}, ch={}. Check font pixel size or DPI.", .{ cw, ch });
             return error.InvalidFontMetrics;
         }
-        // const cw = 12;
-        // const ch = 16;
-        const ascent = @as(u32, @intFromFloat(pixel_size * 0.8)); // Approximate ascent
+        const ascent: u16 = @intCast(xrender_font.font.ascent); // Approximate ascent
         const border_px = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
         std.log.info("cw and ch from font: cw={} ch={}", .{ cw, ch });
 
-        // var border_px = @as(u16, @intCast(c.borderpx)); // u16
         const cols_u16 = @as(u16, @intCast(c.cols)); // u8
         const rows_u16 = @as(u16, @intCast(c.rows)); // u8
-        if (border_px == 0) {
-            border_px = 1;
-        }
+
         const width_check = try std.math.add(u16, try std.math.mul(u16, 2, border_px), try std.math.mul(u16, cols_u16, cw));
         const height_check = try std.math.add(u16, try std.math.mul(u16, 2, border_px), try std.math.mul(u16, rows_u16, ch));
         const win_width = width_check;
@@ -1738,6 +1734,14 @@ pub const XlibTerminal = struct {
             std.log.err("cannot create pixmap in xlibinit, error: {}", .{err.*.error_code});
             return error.CannotCreatePixmap;
         }
+        const buf = try Buf.Buf.init(
+            allocator,
+            connection,
+            screen,
+            pixmap,
+            win.win_size.width,
+            win.win_size.height,
+        );
 
         std.log.info("Creating pixmap with depth: {}", .{pixmap_depth});
 
@@ -1786,6 +1790,7 @@ pub const XlibTerminal = struct {
         _ = c.xcb_flush(connection);
 
         return .{
+            .buf = buf,
             .term = term,
             .visual = visual_data,
             // .attrs = attrs,
@@ -2088,6 +2093,7 @@ pub const XlibTerminal = struct {
         const row = self.term.line[y1][x1..x2];
         try self.xdrawglyphfontspecs(row, x1, y1, x2 - x1);
     }
+
     pub fn xdrawglyphfontspecs(self: *XlibTerminal, glyphs: []const Glyph, x: u16, y: u16, len: usize) !void {
         if (len == 0 or len > c.MAX_COLS) {
             std.log.err("Invalid glyph length: {d}", .{len});
@@ -2111,21 +2117,21 @@ pub const XlibTerminal = struct {
         const py_base = std.math.add(u16, borderpx, y_scaled) catch return error.Overflow;
         const py = std.math.add(u16, py_base, @as(u16, @intCast(ascent))) catch return error.Overflow;
 
-        // Clear entire region with default background
-        const total_width = std.math.mul(u16, char_width, @as(u16, @intCast(len))) catch return error.Overflow;
-        var fg = self.dc.col[c.defaultfg].color;
-        const default_bg_pixel = font.xcb_color_to_uint32(fg.cval().*) | 0xff000000;
+        // // Clear entire region with default background
+        // // const total_width = std.math.mul(u16, char_width, @as(u16, @intCast(len))) catch return error.Overflow;
+        // var fg = self.dc.col[c.defaultfg].color;
+        // const default_bg_pixel = font.xcb_color_to_uint32(fg.cval().*) | 0xff000000;
         const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-        const values = [_]u32{ default_bg_pixel, 0 };
-        _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
+        // const values = [_]u32{ default_bg_pixel, 0 };
+        // _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
 
-        const clear_rect = c.xcb_rectangle_t{
-            .x = @intCast(px),
-            .y = @intCast(py_base),
-            .width = @intCast(total_width),
-            .height = @intCast(char_height),
-        };
-        _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect);
+        // const clear_rect = c.xcb_rectangle_t{
+        //     .x = @intCast(px),
+        //     .y = @intCast(py_base),
+        //     .width = @intCast(total_width),
+        //     .height = @intCast(char_height),
+        // };
+        // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect);
 
         var start: usize = 0;
         var text: [c.MAX_COLS]u32 = undefined;
@@ -2164,24 +2170,24 @@ pub const XlibTerminal = struct {
 
                     const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
                     const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
-                    const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
-                    const rect_y = py_base; // Already offset by ascent in py
+                    // const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
+                    // const rect_y = py_base; // Already offset by ascent in py
 
-                    const clear_rect_group = c.xcb_rectangle_t{
-                        .x = @intCast(rect_x),
-                        .y = @intCast(rect_y),
-                        .width = @intCast(rect_width),
-                        .height = @intCast(char_height),
-                    };
-                    _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
+                    // const clear_rect_group = c.xcb_rectangle_t{
+                    //     .x = @intCast(rect_x),
+                    //     .y = @intCast(rect_y),
+                    //     .width = @intCast(rect_width),
+                    //     .height = @intCast(char_height),
+                    // };
+                    // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
 
                     // Render text with foreground color
                     _ = try self.dc.font.face.drawText(
-                        self.pixmap,
+                        &self.buf,
+                        text[0..text_len],
                         @intCast(rect_x),
                         @intCast(py),
-                        text[0..text_len],
-                        fg_color.cval().*,
+                        fg_color.cval_pixman(),
                     );
                 }
 
@@ -2223,11 +2229,11 @@ pub const XlibTerminal = struct {
                 _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
 
                 _ = try self.dc.font.face.drawText(
-                    self.pixmap,
+                    &self.buf,
+                    text[0..text_len],
                     @intCast(rect_x),
                     @intCast(py),
-                    text[0..text_len],
-                    fg_color.cval().*,
+                    fg_color.cval_pixman(),
                 );
             }
         }
@@ -2766,6 +2772,20 @@ pub const XlibTerminal = struct {
             height,
         );
 
+        if (width != self.buf.width or height != self.buf.height) {
+            self.buf.deinit();
+            self.buf = try Buf.Buf.init(
+                self.allocator,
+                self.connection,
+                self.screen,
+                get_main_window(self.connection),
+                width,
+                height,
+            );
+        }
+
+        self.buf.setContainerSize(width, height);
+
         // Clear pixmap with default background
         const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
         const values = [_]u32{ bg_pixel, 0 };
@@ -2780,22 +2800,20 @@ pub const XlibTerminal = struct {
         std.log.info("Resized: width={d}, height={d}, cols={d}, rows={d}", .{ width, height, cols, rows });
     }
     // PROD REDRAW
-    //TODO:make copy only new lines not full window
     pub fn redraw(self: *XlibTerminal) !void {
         const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
         std.log.debug("Redrawing screen", .{});
 
-        const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
-        const values = [_]u32{ bg_pixel, 0 };
-        _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
-        const full_rect = c.xcb_rectangle_t{
-            .x = 0,
-            .y = 0,
-            .width = self.win.win_size.width,
-            .height = self.win.win_size.height,
-        };
-        _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &full_rect);
-
+        // const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
+        // const values = [_]u32{ bg_pixel, 0 };
+        // _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
+        // const full_rect = c.xcb_rectangle_t{
+        //     .x = 0,
+        //     .y = 0,
+        //     .width = self.win.win_size.width,
+        //     .height = self.win.win_size.height,
+        // };
+        // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &full_rect);
         var i: usize = 0;
         while (i < self.term.size_grid.rows) : (i += 1) {
             try self.xdrawglyphfontspecs(
@@ -2811,12 +2829,12 @@ pub const XlibTerminal = struct {
             self.pixmap,
             get_main_window(self.connection),
             self.dc.gc,
-            0,
-            0,
-            borderpx,
-            borderpx,
-            self.win.win_size.width - 2 * borderpx,
-            self.win.win_size.height - 2 * borderpx,
+            @intCast(borderpx),
+            @intCast(borderpx),
+            @intCast(borderpx),
+            @intCast(borderpx),
+            self.win.win_size.width,
+            self.win.win_size.height,
         );
 
         _ = c.xcb_flush(self.connection);
@@ -2825,6 +2843,7 @@ pub const XlibTerminal = struct {
     }
     pub fn deinit(self: *Self) void {
         self.pty.deinit();
+        self.buf.deinit();
         self.dc.font.face.deinit();
         self.xkb_state.unref();
         self.xkb_keymap.unref();
