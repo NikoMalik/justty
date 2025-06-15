@@ -29,6 +29,7 @@ fn addDep(
     // artifact.linkSystemLibrary("harfbuzz");
     // artifact.linkSystemLibrary("pixman-1");
     artifact.linkSystemLibrary("xcb");
+    artifact.linkSystemLibrary("xcb-image");
     artifact.linkSystemLibrary("xinerama");
     artifact.linkSystemLibrary("xcb-cursor");
     artifact.linkSystemLibrary("xcb-keysyms");
