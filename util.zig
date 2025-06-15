@@ -183,23 +183,48 @@ pub fn utf8_validate_pos(input: []const u8) ?usize {
     return i;
 }
 
-pub fn utf8_validate(input: []const u8) bool {
+pub inline fn utf8_validate(input: []const u8) bool {
     return simd_validate_utf8(input.ptr, input.len);
 }
 
 /// find begin CSI escape (\x1B[).
 /// return index of begin or null, if not found.
-pub fn indexOfCsiStart(input: []const u8) ?usize {
+pub inline fn indexOfCsiStart(input: []const u8) ?usize {
     const result = simd_index_of_csi_start(input.ptr, input.len);
     return if (result == input.len) null else result;
 }
-
 test "indexOfCsiStart" {
     const testing = std.testing;
     const input = "\x1B[31mHello";
     try testing.expectEqual(@as(usize, 0), indexOfCsiStart(input).?);
     try testing.expectEqual(null, indexOfCsiStart("No CSI"));
     try testing.expectEqual(@as(usize, 5), indexOfCsiStart("Hello\x1B[m").?);
+}
+
+pub inline fn lastIndex(input: []const u8, v: u8) ?usize {
+    const result = simd_last_index_of_byte(input.ptr, input.len, v);
+    if (result == 0) return null;
+    return if (result == input.len) null else result;
+}
+
+test "lastIndex finds last occurrence of byte" {
+    const input = [_]u8{ 1, 2, 3, 2, 4 };
+    try std.testing.expectEqual(@as(?usize, 3), lastIndex(&input, 2));
+}
+
+test "last index find ::" {
+    const input = "s::";
+    try std.testing.expectEqual(@as(?usize, 2), lastIndex(input, ':'));
+}
+
+test "lastIndex returns null if byte not found" {
+    const input = [_]u8{ 1, 2, 3, 4 };
+    try std.testing.expectEqual(@as(?usize, null), lastIndex(&input, 5));
+}
+
+test "lastIndex handles empty slice" {
+    const input = [_]u8{};
+    try std.testing.expectEqual(@as(?usize, null), lastIndex(&input, 1));
 }
 
 /// extract full CSI escape, begin from index.
@@ -670,7 +695,17 @@ extern "c" fn simd_contains_newline_or_non_ascii_or_quote(
 
 extern "c" fn simd_index_of_csi_start(input: [*]const u8, len: usize) usize;
 extern "c" fn simd_extract_csi_sequence(input: [*]const u8, len: usize, start: usize, end: *usize) usize;
-extern "c" fn simd_parse_csi_params(csi: [*]const u8, len: usize, params: [*]i32, max_params: usize) usize;
+extern "c" fn simd_parse_csi_params(
+    csi: [*]const u8,
+    len: usize,
+    params: [*]i32,
+    max_params: usize,
+) usize;
 extern "c" fn simd_get_csi_command_type(csi: [*]const u8, len: usize) u8;
 extern "c" fn simd_is_valid_csi(input: [*]const u8, len: usize) bool;
 extern "c" fn simd_count_utf8_in_csi(csi: [*]const u8, len: usize) usize;
+extern "c" fn simd_last_index_of_byte(
+    input: [*]const u8,
+    len: usize,
+    value: u8,
+) usize;

@@ -21,8 +21,9 @@ HWY_ATTR size_t IndexOfCharImpl(const uint8_t* HWY_RESTRICT haystack, size_t hay
     return (pos < haystack_len) ? pos : haystack_len;
 }
 
-    D8 d;
 HWY_ATTR bool CompareImpl(const uint8_t* a, const uint8_t* b, size_t len) {
+    D8 d;
+
     size_t i = 0;
     const size_t N = hn::Lanes(d);
     for (; i + N <= len; i += N) {
@@ -36,6 +37,30 @@ HWY_ATTR bool CompareImpl(const uint8_t* a, const uint8_t* b, size_t len) {
     return true;
 }
 
+
+HWY_ATTR size_t LastIndexOfByte(const uint8_t* data, size_t len, uint8_t value) {
+    assert(len > 0);
+    D8 d;
+    const size_t lanes = hn::Lanes(d);
+
+    size_t i = len;
+    while (i >= lanes) {
+        i -= lanes;
+        const auto vec = hn::LoadU(d, data + i);
+        const auto mask = vec == hn::Set(d, value); 
+        intptr_t pos = hn::FindFirstTrue(d, mask); 
+        if (pos >= 0) {
+            return i + static_cast<size_t>(pos); 
+        }
+    }
+
+    while (i > 0) {
+        --i;
+        if (data[i] == value) return i;
+    }
+
+    return 0; 
+}
 HWY_ATTR size_t IndexOfCsiStartImpl(const uint8_t* input, size_t len) {
     D8 d;
     const size_t N = hn::Lanes(d);
@@ -278,7 +303,7 @@ HWY_AFTER_NAMESPACE();
 
 extern "C" {
 
-
+HWY_EXPORT(LastIndexOfByte);
 HWY_EXPORT(IndexOfCharImpl);
 HWY_EXPORT(IndexOfAnyCharImpl);
 HWY_EXPORT(CompareImpl);
@@ -311,6 +336,12 @@ size_t simd_index_of_csi_start(const uint8_t* input, size_t len) {
 
 size_t simd_extract_csi_sequence(const uint8_t* input, size_t len, size_t start, size_t* end) {
     return HWY_DYNAMIC_DISPATCH(ExtractCsiSeqImpl)(input, len, start, end);
+}
+
+
+size_t simd_last_index_of_byte(const uint8_t* input, size_t len,uint8_t value)
+ {
+     return HWY_DYNAMIC_DISPATCH(LastIndexOfByte)(input,len,value);
 }
 
 
