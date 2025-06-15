@@ -96,6 +96,7 @@ const srcs = &.{
     "pixman/pixman-arm.c",
     "pixman/pixman-ppc.c",
     "pixman/pixman-edge.c",
+    "pixman/pixman-riscv.c",
     "pixman/pixman-edge-accessors.c",
     "pixman/pixman-fast-path.c",
     "pixman/pixman-glyph.c",
