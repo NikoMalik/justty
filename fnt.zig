@@ -110,7 +110,11 @@ const RasterizedText = struct {
     }
 };
 
-pub fn rasterizeText(font: *fcft.fcft_font, text: []const u32, allocator: Allocator) !RasterizedText {
+pub fn rasterizeText(
+    font: *fcft.fcft_font,
+    text: []const u32,
+    allocator: Allocator,
+) !RasterizedText {
     var glyphs = std.ArrayList(RasterizedGlyph).init(allocator);
     defer glyphs.deinit();
 
@@ -156,7 +160,11 @@ pub const XRenderFont = struct {
 
     const Self = @This();
 
-    pub fn init(conn: *c.xcb_connection_t, allocator: Allocator, fontquery: [:0]const u8) !Self {
+    pub fn init(
+        conn: *c.xcb_connection_t,
+        allocator: Allocator,
+        comptime fontquery: [:0]const u8,
+    ) !Self {
         if (c.xcb_connection_has_error(conn) != 0) {
             std.log.err("cannot connect XCB", .{});
             return XcbftError.XcbConnectionError;
@@ -173,9 +181,6 @@ pub const XRenderFont = struct {
         }
 
         font_name_buffer[0] = fontquery.ptr;
-        // var name_buffer = try allocator.alloc([*c]const u8, 1);
-        // defer allocator.free(name_buffer);
-        // name_buffer[0] = fontquery.ptr;
 
         const font = fcft.fcft_from_name(
             1,
