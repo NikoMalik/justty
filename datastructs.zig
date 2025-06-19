@@ -51,9 +51,6 @@ pub fn IntegerBitSet(comptime IndexT: type) type {
 
         /// Returns true if the bit at the specified index is present in the set, false otherwise.
         pub fn isSet(self: Self, index: IndexT) bool {
-            if (comptime util.isDebug) {
-                assert(@as(usize, @intFromEnum(index)) < bit_length);
-            }
             return (self.mask & maskBit(index)) != 0;
         }
 
@@ -64,9 +61,7 @@ pub fn IntegerBitSet(comptime IndexT: type) type {
 
         /// Changes the value of the specified bit of the bit set to match the passed boolean.
         pub fn setValue(self: *Self, index: IndexT, value: bool) void {
-            if (comptime util.isDebug) {
-                assert(@as(usize, @intFromEnum(index)) < bit_length);
-            }
+            assert(@as(usize, @intFromEnum(index)) < bit_length);
 
             if (MaskInt == u0) return;
             const bit = maskBit(index);
@@ -76,19 +71,11 @@ pub fn IntegerBitSet(comptime IndexT: type) type {
 
         /// Adds a specific bit to the bit set
         pub fn set(self: *Self, index: IndexT) void {
-            if (comptime util.isDebug) {
-                assert(@as(usize, @intFromEnum(index)) < bit_length);
-            }
-
             self.mask |= maskBit(index);
         }
 
         /// Changes the value of all bits in the specified range to match the passed boolean.
         pub fn setRangeValue(self: *Self, start: IndexT, end: IndexT, value: bool) void {
-            if (comptime util.isDebug) {
-                assert(@as(usize, @intFromEnum(end)) <= bit_length);
-                assert(@as(usize, @intFromEnum(start)) <= @as(usize, @intFromEnum(end)));
-            }
             if (start == end) return;
             if (MaskInt == u0) return;
 
@@ -110,18 +97,12 @@ pub fn IntegerBitSet(comptime IndexT: type) type {
 
         /// Removes a specific bit from the bit set
         pub fn unset(self: *Self, index: IndexT) void {
-            if (comptime util.isDebug) {
-                assert(@as(usize, @intFromEnum(index)) < bit_length);
-            }
             if (MaskInt == u0) return;
             self.mask &= ~maskBit(index);
         }
 
         /// Flips a specific bit in the bit set
         pub fn toggle(self: *Self, index: IndexT) void {
-            if (comptime util.isDebug) {
-                assert(@as(usize, @intFromEnum(index)) < bit_length);
-            }
             self.mask ^= maskBit(index);
         }
 

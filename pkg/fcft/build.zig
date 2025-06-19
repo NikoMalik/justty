@@ -67,12 +67,6 @@ pub fn build(b: *std.Build) !void {
     lib.addIncludePath(unicode_data_h.dirname());
     lib.step.dependOn(&generate_unicode.step);
 
-    // pixman
-
-    // lib.linkSystemLibrary("pixman-1"); // done static
-    // lib.linkSystemLibrary("freetype2"); //done static
-    // lib.linkSystemLibrary("harfbuzz"); //done static
-    // lib.linkSystemLibrary("fontconfig"); // done static
     lib.linkLibrary(pixman_dep.?.artifact("pixman"));
     lib.addIncludePath(pixman_dep.?.path("upstream"));
     lib.addIncludePath(pixman_dep.?.path("upstream/pixman"));

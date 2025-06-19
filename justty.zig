@@ -7,7 +7,8 @@ const xlib = @import("x.zig");
 const util = @import("util.zig");
 const print = std.debug.print;
 const xcb_font = @import("xcb_font.zig");
-
+const signal = @import("signal.zig");
+const build_options = @import("build_options");
 test {
     std.testing.refAllDecls(@This());
 }
@@ -108,6 +109,7 @@ pub const Pty = struct {
         if (pid == 0) {
             // Child process
             // Create a new session
+            // try posix.setpgid(0, 0);
             if (pty.setsid() == -1) {
                 std.c._exit(1);
             }
@@ -242,10 +244,10 @@ test "Pty open and exec" {
 
 pub fn main() !void {
     if (comptime util.isDebug) {
-        _ = xcb_font;
-        var alloc = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+        var alloc = std.heap.GeneralPurposeAllocator(.{}){};
         defer _ = alloc.deinit();
         const allocator = alloc.allocator();
+
         // _ = c.XSetLocaleModifiers("");
 
         //bench TODO:make another folder with benches
@@ -284,18 +286,27 @@ pub fn main() !void {
         // try runBenchmark("Identical", large1, large2);
         // try runBenchmark("Completely different", large1, large3);
 
-        var term = try xlib.XlibTerminal.init(allocator);
         _ = c.setlocale(c.LC_CTYPE, "");
-
+        var term = try xlib.XlibTerminal.init(allocator);
         defer term.deinit();
         try term.run();
     } else {
-        const allocator = std.heap.c_allocator;
+        // const allocator = std.heap.c_allocator;
+
+        var smp = std.heap.SmpAllocator{
+            .cpu_count = 1,
+            .threads = @splat(.{}),
+        };
+        const allocator = std.mem.Allocator{
+            .ptr = &smp,
+            .vtable = &std.heap.SmpAllocator.vtable,
+        };
         _ = c.setlocale(c.LC_CTYPE, "");
         // _ = c.XSetLocaleModifiers("");
 
         var term = try xlib.XlibTerminal.init(allocator);
         defer term.deinit();
+
         // term.testing();
         try term.run();
     }

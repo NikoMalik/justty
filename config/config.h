@@ -10,7 +10,7 @@
  *
  * font: see http://freedesktop.org/software/fontconfig/fontconfig-user.html
  */
-static const char font[] = "Liberation Mono:pixelsize=11";
+static const char font[] = "Liberation Mono:size=11";
 
 static const uint16_t borderpx = 2;
 

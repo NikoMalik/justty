@@ -10,6 +10,71 @@ pub inline fn safeClamp(val: anytype, lower: anytype, upper: anytype) @TypeOf(va
     return std.math.clamp(val, lower, upper);
 }
 
+// Disable printing in tests for simple backends.
+pub const backend_can_print = !(builtin.zig_backend == .stage2_spirv64 or builtin.zig_backend == .stage2_riscv64);
+
+fn print(comptime fmt: []const u8, args: anytype) void {
+    if (@inComptime()) {
+        @compileError(std.fmt.comptimePrint(fmt, args));
+    } else if (backend_can_print) {
+        std.debug.print(fmt, args);
+    }
+}
+fn printWithVisibleNewlines(source: []const u8) void {
+    var i: usize = 0;
+    while (std.mem.indexOfScalar(u8, source[i..], '\n')) |nl| : (i += nl + 1) {
+        printLine(source[i..][0..nl]);
+    }
+    print("{s}␃\n", .{source[i..]}); // End of Text symbol (ETX)
+}
+fn printLine(line: []const u8) void {
+    if (line.len != 0) switch (line[line.len - 1]) {
+        ' ', '\t' => return print("{s}⏎\n", .{line}), // Return symbol
+        else => {},
+    };
+    print("{s}\n", .{line});
+}
+
+fn printIndicatorLine(source: []const u8, indicator_index: usize) void {
+    const line_begin_index = if (std.mem.lastIndexOfScalar(u8, source[0..indicator_index], '\n')) |line_begin|
+        line_begin + 1
+    else
+        0;
+    const line_end_index = if (std.mem.indexOfScalar(u8, source[indicator_index..], '\n')) |line_end|
+        (indicator_index + line_end)
+    else
+        source.len;
+
+    printLine(source[line_begin_index..line_end_index]);
+    for (line_begin_index..indicator_index) |_|
+        print(" ", .{});
+    if (indicator_index >= source.len)
+        print("^ (end of string)\n", .{})
+    else
+        print("^ ('\\x{x:0>2}')\n", .{source[indicator_index]});
+}
+
+pub fn expectContainsStrings(expected: []const u8, actual: []const u8) !void {
+    if (indexOf_any_char(expected, actual)) |index| {
+        print("\n====== expected this output: =========\n", .{});
+        printWithVisibleNewlines(expected);
+        print("\n======== instead found this: =========\n", .{});
+        printWithVisibleNewlines(actual);
+        print("\n======================================\n", .{});
+        var diff_line_number: usize = 1;
+        for (expected[0..index]) |value| {
+            if (value == '\n') diff_line_number += 1;
+        }
+        print("First difference occurs on line {d}:\n", .{diff_line_number});
+
+        print("expected:\n", .{});
+        printIndicatorLine(expected, index);
+
+        print("found:\n", .{});
+        printIndicatorLine(actual, index);
+    }
+}
+
 pub inline fn safeLongToI16(value: c_long) !i16 {
     return if (value > std.math.maxInt(i16))
         error.Overflow

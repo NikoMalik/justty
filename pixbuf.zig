@@ -4,6 +4,8 @@ const posix = std.posix;
 const linux = std.os.linux;
 const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
+const build_options = @import("build_options");
+const builtin = @import("builtin");
 
 // pub extern "c" fn mkstemp(template: ?[*:0]const u8) c_int;
 // pub extern "c" fn mkostemp(template: ?[*:0]const u8, flags: c_int) c_int;
@@ -41,7 +43,7 @@ pub const Buf = struct {
     pixman_image: *c.pixman_image_t,
     // mapped: *anyopaque,
     mapped: []align(std.heap.page_size_min) u8,
-
+    deinit_bool: bool,
     is_shm: bool,
     shm: sh,
 
@@ -78,30 +80,47 @@ pub const Buf = struct {
     ) !Self {
         const gc = c.xcb_generate_id(conn);
         const stride = try strideForFormatAndWidth(c.PIXMAN_x8r8g8b8, w);
-        const size: usize = @as(usize, @intCast(stride)) * @as(usize, @intCast(h));
+        const size: usize = try countSize(
+            stride,
+            h,
+        );
         _ = c.xcb_create_gc(conn, gc, container, 0, null);
         var is_shm = false;
         var shm_seg: c.xcb_shm_seg_t = 0;
         var pixmap: c.xcb_pixmap_t = 0;
-        if (is_shm_available(conn)) {
+        if (comptime build_options.shm) {
+            std.log.info("shm available, using shm backend", .{});
             is_shm = true;
             shm_seg = c.xcb_generate_id(conn);
             pixmap = c.xcb_generate_id(conn);
 
             const flags = linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING |
                 MFD_NOEXEC_SEAL;
-
-            var pool_fd = linux.memfd_create(
-                "justty-shm",
-                flags,
-            );
-
-            if (pool_fd < 0) {
+            var pool_fd: usize = undefined;
+            if (comptime build_options.memfd and builtin.os.tag == .freebsd or build_options.memfd and builtin.os.tag == .linux) {
                 pool_fd = linux.memfd_create(
                     "justty-shm",
-                    posix.MFD.CLOEXEC | posix.MFD.ALLOW_SEALING,
+                    flags,
+                );
+
+                if (pool_fd < 0) {
+                    pool_fd = linux.memfd_create(
+                        "justty-shm",
+                        posix.MFD.CLOEXEC | posix.MFD.ALLOW_SEALING,
+                    );
+                }
+            } else {
+                pool_fd = std.c.shm_open(
+                    "justty",
+                    std.c.O{
+                        .ACCMODE = .RDWR,
+                        .CREAT = true,
+                        .EXCL = true,
+                    },
+                    0o600,
                 );
             }
+
             // const pool_fd = posix.memfd_create("justty-shm",  linux.MFD.ALLOW_SEALING | linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING );
             if (linux.ftruncate(@intCast(pool_fd), @intCast(size)) < 0) {
                 std.log.err("Failed to set SHM size: {}", .{std.c._errno(pool_fd)});
@@ -165,6 +184,7 @@ pub const Buf = struct {
                 .pixman_image = pix.?,
                 .mapped = mmapped, // []align(4096) u8
                 .is_shm = true,
+                .deinit_bool = false,
                 .shm = .{
                     .base = .{
                         .id = @intCast(pool_fd),
@@ -178,6 +198,7 @@ pub const Buf = struct {
             };
         } else {
             is_shm = false;
+            std.log.info("used buf wihtout shm backend", .{});
             pixmap = c.xcb_generate_id(conn);
 
             errdefer _ = c.xcb_free_pixmap(conn, pixmap);
@@ -220,6 +241,7 @@ pub const Buf = struct {
                 .container = Container{ .drawable = container, .width = w, .height = h },
                 .x = 0.0,
                 .y = 0.0,
+                .deinit_bool = false,
                 .width = w,
                 .height = h,
                 // .px = @ptrCast(data.ptr),
@@ -317,8 +339,12 @@ pub const Buf = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.deinit_bool) {
+            return;
+        }
+        self.deinit_bool = true;
         _ = c.pixman_image_unref(self.pixman_image);
-        if (self.is_shm) {
+        if (self.is_shm == true) {
             posix.munmap(self.mapped);
             _ = c.xcb_shm_detach(self.conn, self.shm.base.seg);
             _ = c.xcb_free_pixmap(self.conn, self.shm.base.pixmap);
@@ -367,11 +393,19 @@ pub const Buf = struct {
     }
 
     pub fn clear(self: *Self, color: u32) void {
-        const pixels: [*]u32 = @ptrCast(@alignCast(self.mapped.ptr));
-        const total_pixels = @as(usize, self.width) * @as(usize, self.height);
-        @memset(pixels[0..total_pixels], color);
+        if (self.is_shm) {
+            const pixels: [*]u32 = @ptrCast(@alignCast(self.mapped.ptr));
+            const total_pixels = @as(usize, self.width) * @as(usize, self.height);
+            @memset(pixels[0..total_pixels], color);
+        } else {
+            var i: usize = 0;
+            while (i < self.mapped.len) : (i += 3) {
+                self.mapped[i] = @truncate(color); // Blue
+                self.mapped[i + 1] = @truncate(color >> 8); // Green
+                self.mapped[i + 2] = @truncate(color >> 16); // Red
+            }
+        }
     }
-
     pub fn setContainerSize(self: *Self, cw: u16, ch: u16) void {
         const dx: i32 = @divFloor(@as(i32, cw) - @as(i32, self.container.width), 2);
         const dy: i32 = @divFloor(@as(i32, ch) - @as(i32, self.container.height), 2);
@@ -388,6 +422,10 @@ pub const Buf = struct {
         return reply != null and reply.*.shared_pixmaps != 0;
     }
 };
+
+inline fn countSize(stride: u16, h: u16) !usize {
+    return try std.math.mul(u32, @intCast(stride), @intCast(h));
+}
 
 const sh = union {
     base: struct {

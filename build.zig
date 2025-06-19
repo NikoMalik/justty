@@ -23,11 +23,6 @@ fn addDep(
     artifact.addIncludePath(b.path("./include"));
     artifact.addIncludePath(b.path("./config/"));
     artifact.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-
-    // artifact.linkSystemLibrary("freetype2");
-    // artifact.linkSystemLibrary("fontconfig");
-    // artifact.linkSystemLibrary("harfbuzz");
-    // artifact.linkSystemLibrary("pixman-1");
     artifact.linkSystemLibrary("xcb");
     artifact.linkSystemLibrary("xcb-image");
     artifact.linkSystemLibrary("xinerama");
@@ -74,9 +69,6 @@ fn addDep(
         },
     });
 
-    // if (b.systemIntegrationOption("simdutf", .{})) {
-    //     artifact.linkSystemLibrary2("simdutf", .{});
-    // } else {
     if (b.lazyDependency("simdutf", .{
         .target = target,
         .optimize = optimize,
@@ -137,11 +129,6 @@ fn addDep(
         artifact.addIncludePath(pixman_dep.path("include"));
     }
 
-    // }
-
-    // if (b.systemIntegrationOption("highway", .{})) {
-    //     artifact.linkSystemLibrary2("highway", .{});
-    // } else {
     if (b.lazyDependency("highway", .{
         .target = target,
         .optimize = optimize,
@@ -149,11 +136,7 @@ fn addDep(
         artifact.linkLibrary(highway_dep.artifact("highway"));
         artifact.addIncludePath(highway_dep.path("hwy"));
     }
-    // }
 
-    // if (b.systemIntegrationOption("fcft", .{})) {
-    //     artifact.linkSystemLibrary2("fcft", .{});
-    // } else {
     if (b.lazyDependency("fcft", .{
         .target = target,
         .optimize = optimize,
@@ -162,7 +145,6 @@ fn addDep(
         artifact.addIncludePath(fcft_dep.path("fcft"));
         artifact.addIncludePath(fcft_dep.path(""));
     }
-    // }
 }
 
 comptime {
@@ -173,17 +155,51 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const check_result = std.process.Child.run(.{
+        .allocator = b.allocator,
+        .argv = &.{"scripts/check-features.sh"},
+    }) catch |err| {
+        std.log.err("cannot run check-features.sh: {}", .{err});
+        std.process.exit(1);
+    };
+    defer b.allocator.free(check_result.stdout);
+    defer b.allocator.free(check_result.stderr);
+    // std.log.info("check-features.sh stdout: {s}", .{check_result.stdout});
+    // std.log.info("check-features.sh stderr: {s}", .{check_result.stderr});
+
+    var shm_available = false;
+    var memfd_available = false;
+    var lines = std.mem.splitAny(u8, check_result.stdout, "\n");
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        // std.log.info("Processing line: '{s}'", .{trimmed});
+        if (std.mem.startsWith(u8, trimmed, "pub const SHM_AVAILABLE =")) {
+            shm_available = std.mem.indexOf(u8, trimmed, "true") != null;
+            std.log.info("SHM_AVAILABLE parsed as: {}", .{shm_available});
+        } else if (std.mem.startsWith(u8, trimmed, "pub const MEMFD_AVAILABLE =")) {
+            memfd_available = std.mem.indexOf(u8, trimmed, "true") != null;
+            std.log.info("MEMFD_AVAILABLE parsed as: {}", .{memfd_available});
+        }
+    }
+    std.log.info("shm: {}", .{shm_available});
+    std.log.info("memfd: {}", .{memfd_available});
+
+    const options = b.addOptions();
+    options.addOption(bool, "shm", shm_available);
+    options.addOption(bool, "memfd", memfd_available);
     const exe = b.addExecutable(.{
         .name = "justty",
         .use_llvm = true,
         .use_lld = true,
         .root_source_file = b.path("justty.zig"),
-        // .root_module = lib_mod,
         .target = target,
         .link_libc = true,
         .optimize = optimize,
     });
     addDep(exe, b, target, optimize);
+
+    exe.root_module.addOptions("build_options", options);
 
     b.installArtifact(exe);
     const run_exe = b.addRunArtifact(exe);
@@ -198,6 +214,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    unit_tests.root_module.addOptions("build_options", options);
     addDep(unit_tests, b, target, optimize);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);

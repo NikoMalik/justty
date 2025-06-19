@@ -5,6 +5,7 @@ const justty = @import("justty.zig");
 // const font = @import("font.zig");
 const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
+const linux = std.os.linux;
 const data_structs = @import("datastructs.zig");
 const assert = std.debug.assert;
 const unicode = std.unicode;
@@ -18,6 +19,7 @@ pub const ascii_printable =
     \\ `abcdefghijklmnopqrstuvwxyz{|}~
 ;
 const Buf = @import("pixbuf.zig");
+const signal = @import("signal.zig");
 
 const utf_size = 4;
 const esc_buf_size = 128 * utf_size;
@@ -31,6 +33,22 @@ pub inline fn ATTRCMP(a: Glyph, b: Glyph) bool {
     return a.mode.eql(b.mode) and
         a.fg_index == b.fg_index and
         a.bg_index == b.bg_index;
+}
+
+inline fn countWidth(comptime T: type, comptime border_px: T, comptime cols_u16: T, cw: T) !u16 {
+    return std.math.add(
+        T,
+        try std.math.mul(T, 2, border_px),
+        try std.math.mul(T, cols_u16, cw),
+    );
+}
+
+inline fn countHeight(comptime T: type, comptime border_px: T, comptime rows_16: T, ch: T) !u16 {
+    return std.math.add(
+        T,
+        try std.math.mul(T, 2, border_px),
+        try std.math.mul(T, rows_16, ch),
+    );
 }
 
 pub inline fn TIMEDIFF(t1: c.struct_timespec, t2: c.struct_timespec) c_long {
@@ -1584,9 +1602,10 @@ pub const XlibTerminal = struct {
     allocator: Allocator,
     pty: justty.Pty,
     pid: posix.pid_t,
+    signalfd: posix.fd_t,
     visual: VisualData,
     xrender_font: Font,
-    buf: Buf.Buf,
+    buf: *Buf.Buf,
 
     dc: DC,
     term: Term, // Buffer to store pty output
@@ -1597,6 +1616,8 @@ pub const XlibTerminal = struct {
     xkb_keymap: *Keysym.Keymap,
     xkb_state: *Keysym.State,
 
+    extern "c" fn sigemptyset(set: *posix.sigset_t) c_int;
+    extern "c" fn sigaddset(dest: *posix.sigset_t, signum: c_int) c_int;
     const Self = @This();
 
     pub fn init(allocator: Allocator) !Self {
@@ -1652,8 +1673,23 @@ pub const XlibTerminal = struct {
         const cols_u16 = @as(u16, @intCast(c.cols)); // u8
         const rows_u16 = @as(u16, @intCast(c.rows)); // u8
 
-        const width_check = try std.math.add(u16, try std.math.mul(u16, 2, border_px), try std.math.mul(u16, cols_u16, cw));
-        const height_check = try std.math.add(u16, try std.math.mul(u16, 2, border_px), try std.math.mul(u16, rows_u16, ch));
+        // const width_check = try std.math.add(
+        //     u16,
+        //     try std.math.mul(u16, 2, border_px),
+        //     try std.math.mul(u16, cols_u16, cw),
+        // );
+        const width_check = try countWidth(
+            u16,
+            border_px,
+            cols_u16,
+            cw,
+        );
+        const height_check = try countHeight(
+            u16,
+            border_px,
+            rows_u16,
+            ch,
+        );
         const win_width = width_check;
         const win_height = height_check;
         if (win_width == 0 or win_height == 0 or win_width > 32767 or win_height > 32767) {
@@ -1734,13 +1770,13 @@ pub const XlibTerminal = struct {
             std.log.err("cannot create pixmap in xlibinit, error: {}", .{err.*.error_code});
             return error.CannotCreatePixmap;
         }
-        const buf = try Buf.Buf.init(
+        var buf = try Buf.Buf.init(
             allocator,
             connection,
             screen,
             pixmap,
-            win.win_size.width,
-            win.win_size.height,
+            win_width,
+            win_height,
         );
 
         std.log.info("Creating pixmap with depth: {}", .{pixmap_depth});
@@ -1756,6 +1792,7 @@ pub const XlibTerminal = struct {
         var pty = try justty.Pty.open(initial_size);
 
         errdefer pty.deinit();
+
         const pid = try posix.fork();
         // set_cardinal_property(connection, "_NET_WM_PID", @intCast(pid));
         _ = c.xcb_change_property(
@@ -1770,6 +1807,13 @@ pub const XlibTerminal = struct {
         );
         // set_property(conn: *c.xcb_connection_t, prop_name: []const u8, value: []const u8)
         _ = try pty.exec(pid);
+
+        // if (try cgroup_buf.current(pid)) |cgroup_path| {
+        //     std.log.info("Cgroup path for child process (PID {}): {s}", .{ pid, cgroup_path });
+        // } else {
+        //     std.log.warn("No cgroup found for child process (PID {})", .{pid});
+        // }
+
         map_windows(connection, dc.font);
         errdefer _ = c.xcb_free_pixmap(connection, pixmap);
         dc.gc = create_gc(connection, dc.gc, get_main_window(connection), dc.col[c.defaultfg].pixel, dc.col[c.defaultbg].pixel);
@@ -1789,8 +1833,21 @@ pub const XlibTerminal = struct {
 
         _ = c.xcb_flush(connection);
 
+        var sigset: posix.sigset_t = undefined;
+        _ = sigemptyset(&sigset);
+        _ = sigaddset(&sigset, posix.SIG.TERM);
+        _ = sigaddset(&sigset, posix.SIG.INT);
+        _ = sigaddset(&sigset, posix.SIG.HUP);
+        posix.sigprocmask(posix.SIG.BLOCK, &sigset, null);
+
+        const sfd = posix.signalfd(-1, &sigset, linux.SFD.CLOEXEC) catch |err| {
+            std.log.err("Failed to create signalfd: {}", .{err});
+            return err;
+        };
+        errdefer posix.close(sfd);
+
         return .{
-            .buf = buf,
+            .buf = &buf,
             .term = term,
             .visual = visual_data,
             // .attrs = attrs,
@@ -1804,6 +1861,7 @@ pub const XlibTerminal = struct {
             .pty = pty,
             // .atoms = atoms,
             .pid = pid,
+            .signalfd = sfd,
             .dc = dc,
             .win = win,
             .keysyms = keysyms.?,
@@ -2183,7 +2241,7 @@ pub const XlibTerminal = struct {
 
                     // Render text with foreground color
                     _ = try self.dc.font.face.drawText(
-                        &self.buf,
+                        self.buf,
                         text[0..text_len],
                         @intCast(rect_x),
                         @intCast(py),
@@ -2229,7 +2287,7 @@ pub const XlibTerminal = struct {
                 _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
 
                 _ = try self.dc.font.face.drawText(
-                    &self.buf,
+                    self.buf,
                     text[0..text_len],
                     @intCast(rect_x),
                     @intCast(py),
@@ -2368,12 +2426,34 @@ pub const XlibTerminal = struct {
 
     pub fn run(self: *Self) !void {
         const xfd = c.xcb_get_file_descriptor(self.connection);
-        var fds: [2]std.posix.pollfd = .{
-            .{ .fd = xfd, .events = std.posix.POLL.IN, .revents = 0 },
-            .{ .fd = self.pty.master, .events = std.posix.POLL.IN, .revents = 0 },
+        const pty_fd = self.pty.master;
+        const epfd = try posix.epoll_create1(0);
+        defer posix.close(epfd);
+        //xcb
+        var ev_xfd: linux.epoll_event = .{
+            .events = linux.EPOLL.IN | linux.EPOLL.HUP | linux.EPOLL.ERR,
+            .data = .{ .fd = xfd },
         };
+        try posix.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, xfd, &ev_xfd);
+
+        //pty
+        var ev_pty: linux.epoll_event = .{
+            .events = linux.EPOLL.IN | linux.EPOLL.HUP | linux.EPOLL.ERR,
+            .data = .{ .fd = pty_fd },
+        };
+        try posix.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, pty_fd, &ev_pty);
+
+        // signalfd
+        var ev_sfd: linux.epoll_event = .{
+            .events = linux.EPOLL.IN | linux.EPOLL.HUP | linux.EPOLL.ERR,
+            .data = .{ .fd = self.signalfd },
+        };
+        try posix.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, self.signalfd, &ev_sfd);
+
         var buffer: [c.BUFSIZ]u8 = undefined;
         const poll_timeout_ms = 100;
+
+        var events: [3]linux.epoll_event = undefined;
 
         while (true) {
             const result = posix.waitpid(self.pid, posix.W.NOHANG);
@@ -2383,15 +2463,11 @@ pub const XlibTerminal = struct {
                 return;
             }
 
-            const poll_result = std.posix.poll(&fds, poll_timeout_ms) catch |err| {
-                std.log.err("poll error: {}", .{err});
-                self.deinit();
-                return err;
-            };
+            const nfds = linux.epoll_wait(epfd, &events, events.len, poll_timeout_ms);
 
             var input_processed = false;
 
-            if (poll_result == 0) {
+            if (nfds == 0) {
                 if (self.term.dirty.count() > 0) {
                     std.log.debug("Timeout redraw: {} dirty rows", .{self.term.dirty.count()});
                     try self.redraw();
@@ -2399,44 +2475,70 @@ pub const XlibTerminal = struct {
                 continue;
             }
 
-            if (fds[0].revents != 0) {
-                if (fds[0].revents & std.posix.POLL.IN != 0) {
-                    while (true) {
-                        const event = c.xcb_poll_for_event(self.connection) orelse break;
-                        defer std.c.free(event);
-                        try self.handleEvent(event);
+            for (events[0..nfds]) |ev| {
+                if (ev.data.fd == xfd) {
+                    //  XCB
+                    if (ev.events & linux.EPOLL.IN != 0) {
+                        while (true) {
+                            const event = c.xcb_poll_for_event(self.connection) orelse break;
+                            defer std.c.free(event);
+                            try self.handleEvent(event);
+                        }
                     }
-                }
-                if (fds[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-                    std.log.err("XCB connection closed or errored: revents={}", .{fds[0].revents});
-                    self.deinit();
-                    return error.XcbConnectionError;
-                }
-            }
-
-            if (fds[1].revents != 0) {
-                if (fds[1].revents & std.posix.POLL.IN != 0) {
-                    const n = self.pty.read(&buffer) catch |err| {
-                        std.log.err("read error from pty: {}", .{err});
-                        continue;
-                    };
-                    if (n == 0) {
-                        std.log.info("PTY closed, exiting", .{});
+                    if (ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR) != 0) {
+                        std.log.err("XCB connection closed or errored: events={x}", .{ev.events});
                         self.deinit();
-                        return;
+                        return error.XcbConnectionError;
                     }
-                    std.log.debug("Raw PTY input ({d} bytes): {x}", .{ n, buffer[0..n] });
-                    try self.process_input(buffer[0..n]);
-                    input_processed = true;
-                }
-                if (fds[1].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-                    std.log.err("PTY closed or errored: revents={}", .{fds[1].revents});
-                    self.deinit();
-                    return error.PtyError;
+                } else if (ev.data.fd == pty_fd) {
+                    // PTY
+                    if (ev.events & linux.EPOLL.IN != 0) {
+                        const n = self.pty.read(&buffer) catch |err| {
+                            std.log.err("read error from pty: {}", .{err});
+                            self.deinit();
+                            return err;
+                        };
+                        if (n == 0) {
+                            std.log.info("Successfully closed PTY", .{});
+                            self.deinit();
+                            return;
+                        }
+                        std.log.debug("Raw PTY input ({d} bytes): {x}", .{ n, buffer[0..n] });
+                        try self.process_input(buffer[0..n]);
+                        input_processed = true;
+                    }
+                    if (ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR) != 0) {
+                        std.log.err("PTY closed or errored: events={x}", .{ev.events});
+                        self.deinit();
+                        return error.PtyError;
+                    }
+                } else if (ev.data.fd == self.signalfd) {
+                    // signalfd
+                    if (ev.events & linux.EPOLL.IN != 0) {
+                        var siginfo: posix.siginfo_t = undefined;
+                        const n = posix.read(self.signalfd, std.mem.asBytes(&siginfo)) catch |err| {
+                            std.log.err("Failed to read from signalfd: {}", .{err});
+                            self.deinit();
+                            return err;
+                        };
+                        if (n != @sizeOf(posix.siginfo_t)) {
+                            std.log.err("Invalid signalfd read size: {}", .{n});
+                            self.deinit();
+                            return error.InvalidSiginfo;
+                        }
+                        std.log.info("Received signal: signo={}", .{siginfo.signo});
+                        self.deinit();
+                        return error.SignalReceived;
+                    }
+                    if (ev.events & (linux.EPOLL.HUP | linux.EPOLL.ERR) != 0) {
+                        std.log.err("signalfd closed or errored: events={x}", .{ev.events});
+                        self.deinit();
+                        return error.SignalFdError;
+                    }
                 }
             }
 
-            if (input_processed) {
+            if (input_processed and self.term.dirty.count() > 0) {
                 std.log.debug("Triggering redraw: input_processed={}, dirty_count={}", .{ input_processed, self.term.dirty.count() });
                 try self.redraw();
             }
@@ -2748,7 +2850,7 @@ pub const XlibTerminal = struct {
         );
     }
 
-    pub fn resize(self: *XlibTerminal, width: u16, height: u16) !void {
+    pub inline fn resize(self: *XlibTerminal, width: u16, height: u16) !void {
         self.win.win_size.width = width;
         self.win.win_size.height = height;
 
@@ -2774,14 +2876,15 @@ pub const XlibTerminal = struct {
 
         if (width != self.buf.width or height != self.buf.height) {
             self.buf.deinit();
-            self.buf = try Buf.Buf.init(
+            var buf = try Buf.Buf.init(
                 self.allocator,
                 self.connection,
                 self.screen,
-                get_main_window(self.connection),
+                self.pixmap,
                 width,
                 height,
             );
+            self.buf = &buf;
         }
 
         self.buf.setContainerSize(width, height);
@@ -2804,18 +2907,22 @@ pub const XlibTerminal = struct {
         const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
         std.log.debug("Redrawing screen", .{});
 
-        // const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
-        // const values = [_]u32{ bg_pixel, 0 };
-        // _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
-        // const full_rect = c.xcb_rectangle_t{
-        //     .x = 0,
-        //     .y = 0,
-        //     .width = self.win.win_size.width,
-        //     .height = self.win.win_size.height,
-        // };
-        // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &full_rect);
+        // Clear pixmap with default background
+        const bg_pixel = self.dc.col[c.defaultbg].pixel | 0xff000000;
+        const values = [_]u32{ bg_pixel, 0 };
+        _ = c.xcb_change_gc(self.connection, self.dc.gc, c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES, &values);
+        const full_rect = c.xcb_rectangle_t{
+            .x = 0,
+            .y = 0,
+            .width = self.win.win_size.width,
+            .height = self.win.win_size.height,
+        };
+        _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &full_rect);
+
+        // Draw only dirty rows
         var i: usize = 0;
         while (i < self.term.size_grid.rows) : (i += 1) {
+            if (!self.term.dirty.isSet(@intCast(i))) continue;
             try self.xdrawglyphfontspecs(
                 self.term.line[i][0..self.term.size_grid.cols],
                 0,
@@ -2824,6 +2931,7 @@ pub const XlibTerminal = struct {
             );
         }
 
+        // Copy pixmap to window
         _ = c.xcb_copy_area(
             self.connection,
             self.pixmap,
@@ -2833,8 +2941,8 @@ pub const XlibTerminal = struct {
             @intCast(borderpx),
             @intCast(borderpx),
             @intCast(borderpx),
-            self.win.win_size.width,
-            self.win.win_size.height,
+            self.win.win_size.width - 2 * borderpx,
+            self.win.win_size.height - 2 * borderpx,
         );
 
         _ = c.xcb_flush(self.connection);
@@ -2848,11 +2956,21 @@ pub const XlibTerminal = struct {
         self.xkb_state.unref();
         self.xkb_keymap.unref();
         self.xkb_context.unref();
+        // if (S.main_initialized) {
+        //     _ = c.xcb_destroy_window(self.connection, S.main_window_id);
+        //     S.main_initialized = false;
+        // }
+        // if (S.root_initialized) {
+        //     _ = c.xcb_destroy_window(self.connection, S.root_window);
+        //     S.root_initialized = false;
+        // }
         _ = c.xcb_free_gc(self.connection, self.dc.gc);
         _ = c.xcb_free_pixmap(self.connection, self.pixmap);
         _ = c.xcb_destroy_window(self.connection, get_main_window(self.connection)); // Destroy main window
+        _ = c.xcb_destroy_window(self.connection, get_root_window(self.connection));
         _ = c.xcb_disconnect(self.connection);
         _ = c.xcb_key_symbols_free(self.keysyms);
+        posix.close(self.signalfd);
     }
 };
 
