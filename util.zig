@@ -10,7 +10,8 @@ pub inline fn safeClamp(val: anytype, lower: anytype, upper: anytype) @TypeOf(va
     return std.math.clamp(val, lower, upper);
 }
 
-// Disable printing in tests for simple backends.
+//---------------------------------------------------------------
+// DEBUG
 pub const backend_can_print = !(builtin.zig_backend == .stage2_spirv64 or builtin.zig_backend == .stage2_riscv64);
 
 fn print(comptime fmt: []const u8, args: anytype) void {
@@ -74,6 +75,8 @@ pub fn expectContainsStrings(expected: []const u8, actual: []const u8) !void {
         printIndicatorLine(actual, index);
     }
 }
+
+//---------------------------------------------------------------
 
 pub inline fn safeLongToI16(value: c_long) !i16 {
     return if (value > std.math.maxInt(i16))
@@ -593,11 +596,29 @@ test "compare" {
     try testing.expect(!compare("hello", "hell"));
 }
 
-pub fn copyBytes(comptime T: type, dest: []T, source: []const T) void {
+pub inline fn copyBytes(comptime T: type, dest: []T, source: []const T) void {
     if (comptime isDebug) {
         if (source.len > dest.len) return; // Safety check
     }
     simd_copy_bytes(source.ptr, dest.ptr, source.len * @sizeOf(T));
+}
+
+pub inline fn moveBytes(dst: []u8, src: []const u8) void {
+    if (comptime isDebug) {
+        if (src.len > dst.len) return;
+    }
+    simd_move_bytes(src.ptr, dst.ptr, src.len * @sizeOf(u8));
+}
+
+test "move_bytes: benchmark" {
+    var src: [1024]u8 = undefined;
+    var dst: [1024]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        moveBytes(&src, &dst);
+    }
+    const elapsed = timer.read();
+    std.debug.print("move_bytes: {} ns\n", .{elapsed / 1000});
 }
 
 test "copyBytes" {
@@ -746,7 +767,8 @@ pub extern "c" fn simd_index_of_any_char(
 extern "c" fn simd_detect_encodings(input: [*]const u8, len: usize) c_int;
 extern "c" fn simd_count_utf8(input: [*]const u8, len: usize) usize;
 extern "c" fn simd_compare(a: [*]const u8, a_len: usize, b: [*]const u8, b_len: usize) bool;
-extern "c" fn simd_copy_bytes(src: [*]const u8, dst: [*]u8, len: usize) void;
+pub extern "c" fn simd_copy_bytes(src: [*]const u8, dst: [*]u8, len: usize) void;
+pub extern "c" fn simd_move_bytes(src: [*]const u8, dst: [*]u8, len: usize) void;
 
 extern "c" fn simd_to_upper(text: [*]u8, len: usize) void;
 extern "c" fn simd_index_of_space_or_newline_or_non_ascii(

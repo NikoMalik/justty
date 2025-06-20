@@ -189,6 +189,7 @@ bool ContainsNewlineOrNonASCIIOrQuoteImpl(const uint8_t* HWY_RESTRICT text, size
 
 
 HWY_ATTR void CopyBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (len == 0) return;
     D8 d;
     size_t i = 0;
     const size_t N = hn::Lanes(d);
@@ -200,6 +201,35 @@ HWY_ATTR void CopyBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
         dst[i] = src[i];
     }
 }
+
+
+
+HWY_ATTR void MoveBytesBackward(const uint8_t* src, uint8_t* dst, size_t len) {
+    D8 d;
+    size_t i = len;
+    const size_t N = hn::Lanes(d);
+    while (i >= N) {
+        i -= N;
+        auto v = hn::LoadN(d, src + i, N);
+        hn::StoreN(v, d, dst + i, N);
+    }
+    while (i > 0) {
+        i--;
+        dst[i] = src[i];
+    }
+}
+
+HWY_ATTR void MoveBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
+    if (len == 0) return;
+
+    // check overlaps
+    if (dst <= src || dst >= src + len) {
+        CopyBytesImpl(src, dst, len); // full copy
+    } else {
+        MoveBytesBackward(src, dst, len);
+    }
+}
+
 
 
 HWY_ATTR void ToUpperImpl(uint8_t* text, size_t len) {
@@ -313,6 +343,7 @@ HWY_EXPORT(IndexOfSpaceOrNewlineOrNonASCIIImpl);
 HWY_EXPORT(ContainsNewlineOrNonASCIIOrQuoteImpl);
 HWY_EXPORT(IndexOfCsiStartImpl);
 HWY_EXPORT(ExtractCsiSeqImpl);
+HWY_EXPORT(MoveBytesImpl);
 
 
 
@@ -408,6 +439,10 @@ bool simd_compare(const uint8_t* a, size_t a_len, const uint8_t* b, size_t b_len
 
 void simd_copy_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
         HWY_DYNAMIC_DISPATCH(CopyBytesImpl)(src, dst, len);
+}
+
+void move_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
+    HWY_DYNAMIC_DISPATCH(MoveBytesImpl)(src, dst, len);
 }
 
 void simd_to_upper(uint8_t* text, size_t len) {

@@ -6,10 +6,6 @@ const testing = std.testing;
 const xlib = @import("x.zig");
 const Atlas = @import("atlas.zig");
 
-// MAYBE SWITCH TO PANGO + CAIRO?????
-
-//TODO: batch, xcb_render_add_glyphs, text_atlas,cache
-
 const TextCacheEntry = struct {
     text: []u32,
     pixmap: c.xcb_pixmap_t,
