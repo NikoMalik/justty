@@ -32,6 +32,12 @@ pub inline fn create_shm_file(size: usize) !?usize {
     return null;
 }
 
+inline fn open_memory_file(name: [*:0]const u8) posix.fd_t {
+    const mfd_cloexec = 0x0001;
+
+    return @intCast(linux.memfd_create(name, mfd_cloexec));
+}
+
 pub inline fn shm_open_anon() !?i32 {
     var name: [30:0]u8 = undefined;
     name[0] = '/';

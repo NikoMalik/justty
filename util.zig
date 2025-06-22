@@ -1,6 +1,49 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const unicode = std.unicode;
+const assert = std.debug.assert;
+const has_avx2 = std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
+
+extern fn asm_memcpy(dest: *anyopaque, src: *const anyopaque, n: usize) callconv(.C) *anyopaque;
+extern fn asm_memmove(dest: *anyopaque, src: *const anyopaque, n: usize) callconv(.C) *anyopaque;
+extern fn __folly_memcpy(dest: *anyopaque, src: *const anyopaque, n: usize) *anyopaque;
+extern fn __folly_memset(dest: *anyopaque, ch: c_int, size: usize) void;
+
+pub inline fn set(comptime T: type, dest: []T, value: u8) void {
+    if (comptime has_avx2) {
+        __folly_memset(
+            @ptrCast(dest.ptr),
+            @intCast(value),
+            dest.len * @sizeOf(T),
+        );
+    } else {
+        @memset(dest, value);
+    }
+}
+
+pub inline fn folly_move(comptime T: type, dest: []T, source: []const T) void {
+    _ = __folly_memcpy(
+        dest.ptr,
+        source.ptr,
+        source.len * @sizeOf(T),
+    );
+}
+
+pub inline fn move_asm(comptime T: type, dest: []T, source: []const T) void {
+    _ = asm_memmove(
+        @ptrCast(dest.ptr),
+        @ptrCast(source.ptr),
+        dest.len * @sizeOf(T),
+    );
+}
+
+pub inline fn copy_asm(comptime T: type, dest: []T, source: []const T) void {
+    _ = asm_memcpy(
+        @ptrCast(dest.ptr),
+        @ptrCast(source.ptr),
+        dest.len * @sizeOf(T),
+    );
+}
 
 pub fn maxLen(input: []const u8) usize {
     return simd_base64_max_length(input.ptr, input.len);
@@ -8,6 +51,54 @@ pub fn maxLen(input: []const u8) usize {
 
 pub inline fn safeClamp(val: anytype, lower: anytype, upper: anytype) @TypeOf(val, lower, upper) {
     return std.math.clamp(val, lower, upper);
+}
+
+pub fn comptime_slice(comptime slice: anytype, comptime len: usize) []const @TypeOf(slice[0]) {
+    return &@as([len]@TypeOf(slice[0]), slice[0..len].*);
+}
+pub const SizePrecision = enum { exact, inexact };
+
+pub inline fn disjoint_slices(comptime A: type, comptime B: type, a: []const A, b: []const B) bool {
+    return @intFromPtr(a.ptr) + a.len * @sizeOf(A) <= @intFromPtr(b.ptr) or
+        @intFromPtr(b.ptr) + b.len * @sizeOf(B) <= @intFromPtr(a.ptr);
+}
+
+fn has_pointers(comptime T: type) bool {
+    switch (@typeInfo(T)) {
+        .Pointer => return true,
+        else => return true,
+
+        .Bool, .Int, .Enum => return false,
+
+        .Array => |info| return comptime has_pointers(info.child),
+        .Struct => |info| {
+            inline for (info.fields) |field| {
+                if (comptime has_pointers(field.type)) return true;
+            }
+            return false;
+        },
+    }
+}
+
+pub fn equal_bytes(comptime T: type, a: *const T, b: *const T) bool {
+    assert(@inComptime());
+    comptime assert(!has_pointers(T));
+    comptime assert(@sizeOf(T) * 8 == @bitSizeOf(T));
+
+    const Word = comptime for (.{ u64, u32, u16, u8 }) |Word| {
+        if (@alignOf(T) >= @alignOf(Word) and @sizeOf(T) % @sizeOf(Word) == 0) break Word;
+    } else unreachable;
+
+    const a_words = std.mem.bytesAsSlice(Word, std.mem.asBytes(a));
+    const b_words = std.mem.bytesAsSlice(Word, std.mem.asBytes(b));
+    comptime assert(a_words.len == b_words.len);
+
+    var total: Word = 0;
+    for (a_words, b_words) |a_word, b_word| {
+        total |= a_word ^ b_word;
+    }
+
+    return total == 0;
 }
 
 //---------------------------------------------------------------
@@ -518,7 +609,59 @@ pub const allow_assert = isDebug or isTest or std.builtin.OptimizeMode.ReleaseSa
 //========================// *debug options //====================
 
 pub inline fn move(comptime T: type, dest: []T, source: []const T) void {
-    _ = memmove(dest.ptr, source.ptr, source.len * @sizeOf(T));
+    if (comptime !has_avx2) {
+        _ = memmove(dest.ptr, source.ptr, source.len * @sizeOf(T));
+    }
+    if (comptime has_avx2) {
+        _ = __folly_memcpy(
+            dest.ptr,
+            source.ptr,
+            source.len * @sizeOf(T),
+        );
+    }
+}
+
+// Copy Backwards
+pub inline fn moveSimd(comptime T: type, dest: []T, source: []const T) void {
+    const len = source.len;
+    const src_ptr = @as([*]const u8, @ptrCast(source.ptr));
+    const dst_ptr = @as([*]u8, @ptrCast(dest.ptr));
+    const byte_len = len * @sizeOf(T);
+    simd_move_bytes(src_ptr, dst_ptr, byte_len);
+}
+
+test "movesimd check" {
+    const a = try std.testing.allocator.alloc(usize, 8);
+    defer std.testing.allocator.free(a);
+
+    for (a, 0..) |*v, i| v.* = i;
+    moveSimd(usize, a[2..], a[0..6]);
+    try std.testing.expect(std.mem.eql(usize, a, &.{ 0, 1, 0, 1, 2, 3, 4, 5 }));
+}
+
+test "folly_check" {
+    const a = try std.testing.allocator.alloc(usize, 8);
+    defer std.testing.allocator.free(a);
+
+    for (a, 0..) |*v, i| v.* = i;
+    folly_move(usize, a[0..6], a[2..]);
+    try std.testing.expect(std.mem.eql(usize, a, &.{ 2, 3, 4, 5, 6, 7, 6, 7 }));
+}
+
+test "moveSimd" {
+    const T = u32;
+    var src = [_]T{ 1, 2, 3, 4, 5 };
+    var dst = [_]T{ 0, 0, 0, 0, 0 };
+
+    moveSimd(T, dst[0..], src[0..]);
+    try std.testing.expectEqualSlices(T, src[0..], dst[0..]);
+
+    src = [_]T{ 1, 2, 3, 4, 5 };
+    moveSimd(T, src[2..4], src[0..2]);
+    try std.testing.expectEqualSlices(T, &[_]T{ 1, 2, 1, 2, 5 }, src[0..]);
+
+    const empty: []T = &.{};
+    moveSimd(T, empty, empty);
 }
 
 pub inline fn copy(comptime T: type, dest: []T, source: []const T) void {
@@ -597,9 +740,6 @@ test "compare" {
 }
 
 pub inline fn copyBytes(comptime T: type, dest: []T, source: []const T) void {
-    if (comptime isDebug) {
-        if (source.len > dest.len) return; // Safety check
-    }
     simd_copy_bytes(source.ptr, dest.ptr, source.len * @sizeOf(T));
 }
 
@@ -610,15 +750,153 @@ pub inline fn moveBytes(dst: []u8, src: []const u8) void {
     simd_move_bytes(src.ptr, dst.ptr, src.len * @sizeOf(u8));
 }
 
+test "folly_move and folly_set: benchmark" {
+    const buffer_size = 10242;
+    var src: [buffer_size]u8 = undefined;
+    var dst: [buffer_size]u8 = undefined;
+    const iterations = 1000;
+
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
+    for (&src) |*byte| {
+        byte.* = random.int(u8);
+    }
+
+    //@follyset
+    var timer = try std.time.Timer.start();
+    for (0..iterations) |_| {
+        set(u8, dst[0..], 0xAA);
+    }
+    const set_elapsed = timer.read();
+    std.debug.print("folly_set bench: {} ns per iteration\n", .{set_elapsed / iterations});
+
+    //  @memset
+    timer.reset();
+    for (0..iterations) |_| {
+        @memset(dst[0..], 0xAA);
+    }
+    const std_set_elapsed = timer.read();
+    std.debug.print("std @memset bench: {} ns per iteration\n", .{std_set_elapsed / iterations});
+}
+
+test "copy_simd: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        copyBytes(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("copy_simd bench: {} ns\n", .{elapsed / 1000});
+}
+test "memcpy: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        copy(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("memcpy bench: {} ns\n", .{elapsed / 1000});
+}
+
+test "memcpy_asm: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        copy_asm(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("memcpy asm bench: {} ns\n", .{elapsed / 1000});
+}
+
+test "folly_move_as copy: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        folly_move(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("copy folly bench: {} ns\n", .{elapsed / 1000});
+}
+
+test "@memcpy: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        @memcpy(&dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("memcpy zig: {} ns\n", .{elapsed / 1000});
+}
+
+test "memmove_bytes_glibc: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        move(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("move_bytes_glibc big: {} ns\n", .{elapsed / 1000});
+}
+
+test "move_bytes_folly_big: benchmark" {
+    var src: [10242]u8 = undefined;
+    var dst: [10242]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        folly_move(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("move_bytes_folly_big: {} ns\n", .{elapsed / 1000});
+}
+
+test "move_bytes_folly: benchmark" {
+    var src: [1024]u8 = undefined;
+    var dst: [1024]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        folly_move(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("move_bytes_folly: {} ns\n", .{elapsed / 1000});
+}
+
+test "move_bytes_asm: benchmark" {
+    var src: [1024]u8 = undefined;
+    var dst: [1024]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        move_asm(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("move_bytes_asm: {} ns\n", .{elapsed / 1000});
+}
+
 test "move_bytes: benchmark" {
     var src: [1024]u8 = undefined;
     var dst: [1024]u8 = undefined;
     var timer = try std.time.Timer.start();
     for (0..1000) |_| {
-        moveBytes(&src, &dst);
+        moveSimd(u8, &dst, &src);
     }
     const elapsed = timer.read();
-    std.debug.print("move_bytes: {} ns\n", .{elapsed / 1000});
+    std.debug.print("move_bytes_simd: {} ns\n", .{elapsed / 1000});
+}
+
+test "memmove_bytes: benchmark" {
+    var src: [1024]u8 = undefined;
+    var dst: [1024]u8 = undefined;
+    var timer = try std.time.Timer.start();
+    for (0..1000) |_| {
+        move(u8, &dst, &src);
+    }
+    const elapsed = timer.read();
+    std.debug.print("move_bytes_glibc: {} ns\n", .{elapsed / 1000});
 }
 
 test "copyBytes" {

@@ -74,6 +74,13 @@ pub fn IntegerBitSet(comptime IndexT: type) type {
             self.mask |= maskBit(index);
         }
 
+        pub fn setOrUnset(self: *Self, index: IndexT, is_set: bool) void {
+            if (is_set) {
+                self.set(index);
+            } else {
+                self.unset(index);
+            }
+        }
         /// Changes the value of all bits in the specified range to match the passed boolean.
         pub fn setRangeValue(self: *Self, start: IndexT, end: IndexT, value: bool) void {
             if (start == end) return;

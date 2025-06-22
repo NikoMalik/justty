@@ -174,16 +174,16 @@ const CSIEscape = struct {
         self.mode = [_]u8{ 0, 0 };
     }
 
-    pub fn parse_esc(self: *Self, xterm: *XlibTerminal, data: []const u8) void {
+    pub fn parse_esc(self: *Self, xterm: *XlibTerminal, data: []const u8) !void {
         for (data) |byte| {
             if (byte == '\n') {
-                xterm.term.cursor.pos.x = 0;
-                if (xterm.term.cursor.pos.y < xterm.term.size_grid.rows - 1) {
-                    xterm.term.cursor.pos.y += 1;
+                xterm.term.cursor.pos.addX(0);
+                if (xterm.term.cursor.pos.getY().? < xterm.term.window.tty_grid.getRows().? - 1) {
+                    xterm.term.cursor.pos.data.position.y += 1;
                 } else {
                     xterm.scrollUp(1);
                 }
-                xterm.term.set_dirt(xterm.term.cursor.pos.y, xterm.term.cursor.pos.y);
+                xterm.term.set_dirt(@intCast(xterm.term.cursor.pos.getY().?), @intCast(xterm.term.cursor.pos.getY().?));
                 continue;
             }
 
@@ -268,7 +268,7 @@ const CSIEscape = struct {
                         self.narg += 1;
                     }
 
-                    xterm.csihandle(self); // Process the CSI sequence
+                    try xterm.csihandle(self); // Process the CSI sequence
                     self.reset(xterm);
                     // xterm.term.esc_mode = EscMode.initEmpty();
                     // self.esc_len = 0;
@@ -448,23 +448,25 @@ const Term = struct {
         if (cursor_x >= cols) return;
 
         // count symbols to move
-        const chars_to_shift = try std.math.sub(u16, cols, @intCast(cursor_x));
-        const insert_count: u16 = @min(n, chars_to_shift);
+        const chars_to_shift = try std.math.sub(i16, @intCast(cols), @intCast(cursor_x));
+        const insert_count: i16 = @min(@as(i16, @intCast(n)), chars_to_shift);
 
         // move to right with simd_copy_bytes
         if (chars_to_shift > insert_count) {
             // const src = &screen[row][cursor_x];
             // const dst = &screen[row][cursor_x + insert_count];
             const len = (chars_to_shift - insert_count) * @sizeOf(Glyph);
-            const src_ptr = std.mem.asBytes(&screen[row][cursor_x]);
-            const dst_ptr = std.mem.asBytes(&screen[row][cursor_x + insert_count]);
-            util.simd_copy_bytes(src_ptr, dst_ptr, len);
+            const src_ptr = std.mem.asBytes(&screen[@intCast(row)][@intCast(cursor_x)]);
+            const dst_ptr = std.mem.asBytes(&screen[@intCast(row)][@intCast(cursor_x + insert_count)]);
+            assert(len > 0);
+            assert(row > 0);
+            util.simd_copy_bytes(src_ptr, dst_ptr, @intCast(len));
         }
 
         // ostatok with zero glyphs
-        @memset(screen[row][cursor_x .. cursor_x + insert_count], Glyph.initEmpty());
+        @memset(screen[@intCast(row)][@intCast(cursor_x)..@intCast(cursor_x + insert_count)], Glyph.initEmpty());
 
-        self.set_dirt(row, row);
+        self.set_dirt(@intCast(row), @intCast(row));
     }
 
     // NOTE: Deletes n characters starting from the current cursor position, shifting the remaining characters to the left.
@@ -482,7 +484,7 @@ const Term = struct {
         else
             0;
         self.cursor.pos.addY(new_y);
-        self.set_dirt(old_y, new_y);
+        self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Moves the cursor to the left by n positions.
     inline fn csi_cub(self: *Term, params: []u32) !void {
@@ -493,7 +495,7 @@ const Term = struct {
         else
             0;
         self.cursor.pos.addX(new_x);
-        self.set_dirt(self.cursor.pos.getY().?, self.cursor.pos.getY().?);
+        self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getY().?));
     }
 
     // NOTE: Moves the cursor down n lines.
@@ -502,10 +504,10 @@ const Term = struct {
         const old_y = self.cursor.pos.getY().?;
         const new_y = @min(
             old_y + @as(i16, @intCast(n)),
-            self.window.tty_grid.getRows().? - 1,
+            @as(i16, @intCast(self.window.tty_grid.getRows().? - 1)),
         );
         self.cursor.pos.addY(new_y);
-        self.set_dirt(old_y, new_y);
+        self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Processes Media Control commands. (Media Control)
     inline fn csi_mc(self: *Term, params: []u32, xterm: *XlibTerminal) void {
@@ -527,18 +529,19 @@ const Term = struct {
     // NOTE:moves the cursor right n lines
     inline fn csi_cuf(self: *Term, params: []u32) void { // Cursor Forward
         const n = DEFAULT(u32, params[0], 1);
-        const new_x = @min(self.cursor.pos.getX().? + @as(i16, @intCast(n)), self.window.tty_grid.getCols().? - 1);
+        const new_x = @min(self.cursor.pos.getX().? + @as(i16, @intCast(n)), @as(i16, @intCast(self.window.tty_grid.getCols().? - 1)));
         self.cursor.pos.addX(new_x);
-        self.set_dirt(self.cursor.pos.getY().?, self.cursor.pos.getY().?);
+        self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getY().?));
     }
+
     // NOTE: Moves the cursor to the beginning of the next line (or n lines below).
     inline fn csi_cnl(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
         const old_y = self.cursor.pos.getY().?;
         self.cursor.pos.addX(0);
-        const new_y = @min(old_y + @as(i16, @intCast(n)), self.window.tty_grid.getRows().? - 1);
+        const new_y = @min(old_y + @as(i16, @intCast(n)), @as(i16, @intCast(self.window.tty_grid.getRows().? - 1)));
         self.cursor.pos.addY(new_y);
-        self.set_dirt(old_y, new_y);
+        self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Moves the cursor to the beginning of the previous line (or n lines above).
     inline fn csi_cpl(self: *Term, params: []u32) void {
@@ -547,12 +550,12 @@ const Term = struct {
         self.cursor.pos.addX(0);
         const new_y = if (old_y > n) old_y - @as(i16, @intCast(n)) else 0;
         self.cursor.pos.addY(new_y);
-        self.set_dirt(new_y, old_y);
+        self.set_dirt(@intCast(new_y), @intCast(old_y));
     }
     // NOTE: Controls the tabulation setting (Tabulation Clear).
     inline fn csi_tbc(self: *Term, params: []u32) void {
         switch (params[0]) {
-            0 => self.tabs[self.cursor.pos.getX().?] = 0,
+            0 => self.tabs[@intCast(self.cursor.pos.getX().?)] = 0,
             3 => @memset(&self.tabs, 0),
             else => std.log.warn("Unknown TBC parameter: {}", .{params[0]}),
         }
@@ -560,19 +563,20 @@ const Term = struct {
     // NOTE: Moves the cursor to the absolute position on the current line.
     inline fn csi_cha(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
-        const new_x = @min(@as(i16, @intCast(n - 1)), self.window.tty_grid.getCols().? - 1);
+        const new_x = @min(@as(i16, @intCast(n - 1)), @as(i16, @intCast(self.window.tty_grid.getCols().? - 1)));
         self.cursor.pos.addX(new_x);
-        self.set_dirt(self.cursor.pos.getY().?, self.cursor.pos.getY().?);
+        self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getY().?));
     }
+
     // NOTE: Moves the cursor to the specified position (row, column).
     inline fn csi_cup(self: *Term, params: []u32) void { // Cursor Position
         const row = DEFAULT(u32, params[0], 1);
         const col = DEFAULT(u32, params[1], 1);
-        const new_y = @min(@as(i16, @intCast(row - 1)), self.window.tty_grid.getRows().? - 1);
-        const new_x = @min(@as(i16, @intCast(col - 1)), self.window.tty_grid.getCols().? - 1);
+        const new_y = @min(@as(i16, @intCast(row - 1)), @as(i16, @intCast(self.window.tty_grid.getRows().? - 1)));
+        const new_x = @min(@as(i16, @intCast(col - 1)), @as(i16, @intCast(self.window.tty_grid.getCols().? - 1)));
         const old_y = self.cursor.pos.getY().?;
         self.cursor.pos.addPosition(new_x, new_y);
-        self.set_dirt(old_y, new_y);
+        self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Moves the cursor n tabs to the right.
     inline fn csi_cht(self: *Term, params: []u32) void { // Character Tabulation
@@ -587,19 +591,19 @@ const Term = struct {
         const rows = self.window.tty_grid.getRows().? - 1;
         switch (n) {
             0 => {
-                self.tclearregion(self.cursor.pos.getX().?, self.cursor.pos.getY().?, cols, self.cursor.pos.getY().?);
+                self.tclearregion(self.cursor.pos.getX().?, self.cursor.pos.getY().?, @intCast(cols), self.cursor.pos.getY().?);
                 if (self.cursor.pos.getY().? < rows) {
-                    self.tclearregion(0, self.cursor.pos.getY().? + 1, cols, rows);
+                    self.tclearregion(0, self.cursor.pos.getY().? + 1, @intCast(cols), @intCast(rows)); //TODO: MAKE COMPTIME TYPE WITHOUT INTCAST EVERYTIME
                 }
             },
             1 => {
                 if (self.cursor.pos.getY().? > 0) {
-                    self.tclearregion(0, 0, cols, self.cursor.pos.getY().? - 1);
+                    self.tclearregion(0, 0, @intCast(cols), self.cursor.pos.getY().? - 1);
                 }
                 self.tclearregion(0, self.cursor.pos.getY().?, self.cursor.pos.getX().?, self.cursor.pos.getY().?);
             },
             2 => {
-                self.tclearregion(0, 0, cols, rows);
+                self.tclearregion(0, 0, @intCast(cols), @intCast(rows));
             },
             else => std.log.warn("Unknown ED parameter: {}", .{n}),
         }
@@ -611,9 +615,9 @@ const Term = struct {
         const y = self.cursor.pos.getY().?;
         const cols = self.window.tty_grid.getCols().? - 1;
         switch (n) {
-            0 => self.tclearregion(self.cursor.pos.getX().?, y, cols, y),
+            0 => self.tclearregion(self.cursor.pos.getX().?, y, @intCast(cols), y),
             1 => self.tclearregion(0, y, self.cursor.pos.getX().?, y),
-            2 => self.tclearregion(0, y, cols, y),
+            2 => self.tclearregion(0, y, @intCast(cols), y),
             else => std.log.warn("Unknown EL parameter: {}", .{n}),
         }
     }
@@ -649,7 +653,7 @@ const Term = struct {
         const n = DEFAULT(u32, params[0], 1);
         const end_x = @min(
             self.cursor.pos.getX().? + @as(i16, @intCast(n)) - 1,
-            self.window.tty_grid.getCols().? - 1,
+            @as(i16, @intCast(self.window.tty_grid.getCols().? - 1)),
         );
         self.tclearregion(
             self.cursor.pos.getX().?,
@@ -660,16 +664,16 @@ const Term = struct {
     }
     // NOTE: Moves the cursor n tabs to the left.
     inline fn csi_cbt(self: *Term, params: []u32) void { // Character Backwards Tabulation
-        const n = DEFAULT(i32, @intCast(params[0]), 1);
+        const n = DEFAULT(i16, @intCast(params[0]), 1);
         self.tputtab(-n);
     }
     // NOTE: Moves the cursor to the specified line (absolute position).
     inline fn csi_vpa(self: *Term, params: []u32) void {
-        const n = DEFAULT(u32, params[0], 1);
-        const new_y = @min(@as(i16, @intCast(n - 1)), self.window.tty_grid.getRows().? - 1);
+        const n = DEFAULT(i16, @intCast(params[0]), 1);
+        const new_y = @min(@as(i16, @intCast(n - 1)), @as(i16, @intCast(self.window.tty_grid.getRows().? - 1)));
         const old_y = self.cursor.pos.getY().?;
         self.cursor.pos.addY(new_y);
-        self.set_dirt(old_y, new_y);
+        self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
 
     // NOTE: Set terminal nodes
@@ -680,7 +684,7 @@ const Term = struct {
     // NOTE: Sets character attributes (color, style, etc.).
     fn csi_sgr(self: *Term, params: []u32, narg: usize) void { // Select Graphic Rendition
         self.handle_sgr(params[0..narg]);
-        self.set_dirt(self.cursor.pos.getY().?, self.cursor.pos.getX());
+        self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getX().?));
     }
     // NOTE: Responds to cursor or device status requests (Device Status Report).
     inline fn csi_dsr(self: *Term, params: []u32, xterm: *XlibTerminal) void {
@@ -741,17 +745,17 @@ const Term = struct {
         const new_y = @min(@as(i16, @intCast(y)), rows - 1);
         const old_y = self.cursor.pos.getY().?;
         self.cursor.pos.addPosition(new_x, new_y);
-        self.set_dirt(old_y, new_y);
+        self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Clears the screen area from (x1, y1) to (x2, y2).
     inline fn tclearregion(self: *Term, x1: i16, y1: i16, x2: i16, y2: i16) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const cols = self.window.tty_grid.getCols().?;
         const rows = self.window.tty_grid.getRows().?;
-        const max_x = @min(x2, cols - 1);
-        const max_y = @min(y2, rows - 1);
-        for (@max(y1, 0)..max_y + 1) |y| {
-            @memset(screen[y][@max(x1, 0) .. max_x + 1], Glyph.initEmpty());
+        const max_x = @min(x2, @as(i16, @intCast(cols - 1)));
+        const max_y = @min(y2, @as(i16, @intCast(rows - 1)));
+        for (@max(y1, 0)..@intCast(max_y + 1)) |y| {
+            @memset(screen[y][@max(x1, 0)..@intCast(max_x + 1)], Glyph.initEmpty());
             self.set_dirt(@intCast(y), @intCast(y));
         }
     }
@@ -764,31 +768,43 @@ const Term = struct {
             var count: u16 = @intCast(n);
             while (x < cols and count > 0) : (count -= 1) {
                 x += 1;
-                while (x < cols and self.tabs[x] == 0) x += 1;
+                while (x < cols and self.tabs[@intCast(x)] == 0) x += 1;
             }
         } else if (n < 0) {
             var count: i16 = n;
             while (x > 0 and count < 0) : (count += 1) {
                 x -= 1;
-                while (x > 0 and self.tabs[x] == 0) x -= 1;
+                while (x > 0 and self.tabs[@intCast(x)] == 0) x -= 1;
             }
         }
-        self.cursor.pos.addX(@min(x, cols - 1));
-        self.set_dirt(self.cursor.pos.getY().?, self.cursor.pos.getY().?);
+        self.cursor.pos.addX(@min(x, @as(i16, @intCast(cols - 1))));
+        self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getY().?));
     }
 
     // NOTE: Scrolls up the screen by n lines in the area from top to bottom.
     inline fn tscrollup(self: *Term, top: u16, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const rows = self.window.tty_grid.getRows().?;
-        const shift = @min(n, rows - top);
+        const shift = @min(n, @as(u32, rows - top));
         if (shift == 0) return;
-        const len = (rows - top - shift) * @sizeOf([c.MAX_COLS]Glyph);
-        const src_ptr = std.mem.asBytes(screen[top + shift .. rows]);
-        const dst_ptr = std.mem.asBytes(screen[top .. rows - shift]);
-        util.simd_copy_bytes(dst_ptr, src_ptr, len);
+
+        const row_size = @as(usize, c.MAX_COLS) * @sizeOf(Glyph);
+        const num_rows_to_copy = @as(usize, rows - top - shift);
+        const len = num_rows_to_copy * row_size;
+
+        // Получаем указатель на начало массива как байты
+        const screen_base_ptr = @as([*]u8, @ptrCast(std.mem.asBytes(&screen[0][0])));
+
+        // Вычисляем указатели на источник и назначение
+        const src_start = screen_base_ptr + (@as(usize, top + shift) * row_size);
+        const dst_start = screen_base_ptr + (@as(usize, top) * row_size);
+
+        util.simd_move_bytes(dst_start, src_start, len);
+
         for (rows - shift..rows) |y| {
-            @memset(&screen[y], Glyph.initEmpty());
+            const row_ptr = screen_base_ptr + (@as(usize, y) * row_size);
+            const row_slice = @as([*]Glyph, @ptrCast(@alignCast(row_ptr)))[0..c.MAX_COLS];
+            @memset(row_slice, Glyph.initEmpty());
             self.set_dirt(@intCast(y), @intCast(y));
         }
         self.set_dirt(top, rows - 1);
@@ -798,14 +814,28 @@ const Term = struct {
     inline fn tscrolldown(self: *Term, top: u16, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const rows = self.window.tty_grid.getRows().?;
-        const shift = @min(n, rows - top);
+        const shift = @min(n, @as(u32, rows - top));
         if (shift == 0) return;
-        const len = (rows - top - shift) * @sizeOf([c.MAX_COLS]Glyph);
-        const src_ptr = std.mem.asBytes(screen[top .. rows - shift]);
-        const dst_ptr = std.mem.asBytes(screen[top + shift .. rows]);
-        util.simd_copy_bytes(dst_ptr, src_ptr, len);
+
+        const row_size = @as(usize, c.MAX_COLS) * @sizeOf(Glyph);
+        const num_rows_to_copy = @as(usize, rows - top - shift);
+        const len = num_rows_to_copy * row_size;
+
+        // Получаем указатель на начало массива как байты
+        const screen_base_ptr = @as([*]u8, @ptrCast(std.mem.asBytes(&screen[0][0])));
+
+        // Вычисляем указатели на источник и назначение
+        const src_start = screen_base_ptr + (@as(usize, top) * row_size);
+        const dst_start = screen_base_ptr + (@as(usize, top + shift) * row_size);
+
+        // Копируем данные вниз
+        util.simd_copy_bytes(dst_start, src_start, len);
+
+        // Очищаем первые shift строк
         for (top..top + shift) |y| {
-            @memset(&screen[y], Glyph.initEmpty());
+            const row_ptr = screen_base_ptr + (@as(usize, y) * row_size);
+            const row_slice = @as([*]Glyph, @ptrCast(@alignCast(row_ptr)))[0..c.MAX_COLS];
+            @memset(row_slice, Glyph.initEmpty());
             self.set_dirt(@intCast(y), @intCast(y));
         }
         self.set_dirt(top, rows - 1);
@@ -815,14 +845,25 @@ const Term = struct {
     inline fn tinsertblankline(self: *Term, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const rows = self.window.tty_grid.getRows().?;
-        const shift = @min(n, rows - self.cursor.pos.getY().?);
+        const cursor_y = self.cursor.pos.getY().?;
+        const shift = @min(n, @as(u32, @intCast(@as(i16, @intCast(rows)) - cursor_y))); // TODO:MAKE EVERYTHERE std..math.sub or std.math.add or comptime checks type
         if (shift == 0) return;
-        const len = (rows - self.cursor.pos.getY().? - shift) * @sizeOf([c.MAX_COLS]Glyph);
-        const src_ptr = std.mem.asBytes(screen[self.cursor.pos.getY().? .. rows - shift]);
-        const dst_ptr = std.mem.asBytes(screen[self.cursor.pos.getY().? + shift .. rows]);
-        util.simd_copy_bytes(dst_ptr, src_ptr, len);
-        for (self.cursor.pos.getY().?..self.cursor.pos.getY().? + shift) |y| {
-            @memset(&screen[y], Glyph.initEmpty());
+
+        const row_size = @as(usize, c.MAX_COLS) * @sizeOf(Glyph);
+        const num_rows_to_copy = @as(usize, @as(usize, @intCast(rows)) - @as(usize, @intCast(cursor_y)) - shift);
+        const len = num_rows_to_copy * row_size;
+
+        const screen_base_ptr = @as([*]u8, @ptrCast(std.mem.asBytes(&screen[0][0])));
+
+        const src_start = screen_base_ptr + (@as(usize, @intCast(cursor_y)) * row_size);
+        const dst_start = screen_base_ptr + (@as(usize, @as(usize, @intCast(cursor_y)) + shift) * row_size);
+
+        util.simd_copy_bytes(dst_start, src_start, len);
+
+        for (@intCast(cursor_y)..@as(usize, @intCast(cursor_y)) + shift) |y| {
+            const row_ptr = screen_base_ptr + (@as(usize, y) * row_size);
+            const row_slice = @as([*]Glyph, @ptrCast(@alignCast(row_ptr)))[0..c.MAX_COLS];
+            @memset(row_slice, Glyph.initEmpty());
             self.set_dirt(@intCast(y), @intCast(y));
         }
     }
@@ -858,41 +899,54 @@ const Term = struct {
     // NOTE: Deletes n lines starting from the current cursor position, shifting the remaining ones upwards.
     inline fn tdeleteline(self: *Term, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
-        const rows = self.window.tty_grid.getRows().?;
-        const shift = @min(n, rows - self.cursor.pos.getY().?);
+        const rows = @as(u32, self.window.tty_grid.getRows().?);
+        const cursor_y = @as(u32, @intCast(self.cursor.pos.getY().?));
+        const shift = @min(n, rows - cursor_y);
         if (shift == 0) return;
-        const len = (rows - self.cursor.pos.getY().? - shift) * @sizeOf([c.MAX_COLS]Glyph);
-        const src_ptr = std.mem.asBytes(screen[self.cursor.pos.getY().? + shift .. rows]);
-        const dst_ptr = std.mem.asBytes(screen[self.cursor.pos.getY().? .. rows - shift]);
-        util.simd_copy_bytes(dst_ptr, src_ptr, len);
+
+        const row_size = @as(usize, c.MAX_COLS) * @sizeOf(Glyph);
+        const num_rows_to_copy = @as(usize, rows - cursor_y - shift);
+        const len = num_rows_to_copy * row_size;
+
+        const screen_base_ptr = @as([*]u8, @ptrCast(std.mem.asBytes(&screen[0][0])));
+
+        const src_start = screen_base_ptr + (@as(usize, cursor_y + shift) * row_size);
+        const dst_start = screen_base_ptr + (@as(usize, cursor_y) * row_size);
+
+        util.simd_copy_bytes(dst_start, src_start, len);
+
         for (rows - shift..rows) |y| {
-            @memset(&screen[y], Glyph.initEmpty());
+            const row_ptr = screen_base_ptr + (@as(usize, y) * row_size);
+            const row_slice = @as([*]Glyph, @ptrCast(@alignCast(row_ptr)))[0..c.MAX_COLS];
+            @memset(row_slice, Glyph.initEmpty());
             self.set_dirt(@intCast(y), @intCast(y));
         }
     }
-
     // NOTE: Deletes n characters on the current line, shifting the remaining characters to the left.
     inline fn tdeletechar(self: *Term, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
-        const cols = self.window.tty_grid.getCols().?;
-        const dest = self.cursor.pos.getX().? + @as(i16, @intCast(n));
-        if (dest >= cols) return;
-        const len = (cols - @as(u16, @intCast(n)) - self.cursor.pos.getX().?) * @sizeOf(Glyph);
-        const src_ptr = std.mem.asBytes(screen[self.cursor.pos.getY().?][dest..cols]);
-        const dst_ptr = std.mem.asBytes(screen[self.cursor.pos.getY().?][self.cursor.pos.getX().? .. cols - @as(u16, @intCast(n))]);
-        if (comptime util.isDebug) {
-            const src_start = @intFromPtr(src_ptr);
-            const dst_start = @intFromPtr(dst_ptr);
-            const src_end = src_start + len;
-            const dst_end = dst_start + len;
-            if (dst_start < src_end and src_start < dst_end) {
-                std.log.warn("Memory overlap detected: src=[{x}..{x}], dst=[{x}..{x}]", .{ src_start, src_end, dst_start, dst_end });
-            }
-        }
+        const cols = @as(u32, self.window.tty_grid.getCols().?);
+        const x = @as(u32, @intCast(self.cursor.pos.getX().?));
+        const y = @as(u32, @intCast(self.cursor.pos.getY().?));
+        const shift = @min(n, cols - x);
+        if (shift == 0) return;
 
-        util.simd_copy_bytes(dst_ptr, src_ptr, len);
-        @memset(screen[self.cursor.pos.getY().?][cols - @as(u16, @intCast(n)) .. cols], Glyph.initEmpty());
-        self.set_dirt(self.cursor.pos.getY().?, self.cursor.pos.getY().?);
+        const glyph_size = @sizeOf(Glyph);
+        const num_to_copy = @as(usize, cols - x - shift);
+        const len = num_to_copy * glyph_size;
+
+        const row_base_ptr = @as([*]u8, @ptrCast(std.mem.asBytes(&screen[y][0])));
+
+        const src_start = row_base_ptr + (@as(usize, x + shift) * glyph_size);
+        const dst_start = row_base_ptr + (@as(usize, x) * glyph_size);
+
+        util.simd_copy_bytes(dst_start, src_start, len);
+
+        const clear_start = row_base_ptr + (@as(usize, cols - shift) * glyph_size);
+        const clear_slice = @as([*]Glyph, @ptrCast(@alignCast(clear_start)))[0..shift];
+        @memset(clear_slice, Glyph.initEmpty());
+
+        self.set_dirt(@intCast(y), @intCast(y));
     }
 
     // NOTE: Sets the scroll area from top to bot.
@@ -920,10 +974,11 @@ const Term = struct {
     inline fn tputc(self: *Term, u: u32) void {
         const x = self.cursor.pos.getX().?;
         const y = self.cursor.pos.getY().?;
+        assert(y > 0);
         const cols = self.window.tty_grid.getCols().?;
         const rows = self.window.tty_grid.getRows().?;
         if (x < cols and y < rows) {
-            self.line[y][x] = Glyph{
+            self.line[@intCast(y)][@intCast(x)] = Glyph{
                 .u = u,
                 .fg_index = self.cursor.attr.fg_index,
                 .bg_index = self.cursor.attr.bg_index,
@@ -938,7 +993,7 @@ const Term = struct {
                     self.tscrollup(self.top, 1);
                 }
             }
-            self.set_dirt(y, y);
+            self.set_dirt(@intCast(y), @intCast(y));
         }
         self.lastc = u;
     }
@@ -987,12 +1042,12 @@ const Term = struct {
         const copy_cols = @min(self.window.tty_grid.getCols().?, new_cols);
         for (0..copy_rows) |y| {
             const len = copy_cols * @sizeOf(Glyph);
-            const src_line = std.mem.asBytes(&self.line[y][0..copy_cols]);
+            var src_line = std.mem.asBytes(&self.line[y][0..copy_cols]);
             const dst_line = std.mem.asBytes(&new_line[y][0..copy_cols]);
-            const src_alt = std.mem.asBytes(&self.alt[y][0..copy_cols]);
+            var src_alt = std.mem.asBytes(&self.alt[y][0..copy_cols]);
             const dst_alt = std.mem.asBytes(&new_alt[y][0..copy_cols]);
-            util.simd_copy_bytes(dst_line, src_line, len);
-            util.simd_copy_bytes(dst_alt, src_alt, len);
+            util.simd_copy_bytes(dst_line, @ptrCast(&src_line), len);
+            util.simd_copy_bytes(dst_alt, @ptrCast(&src_alt), len);
         }
 
         self.line = new_line;
@@ -1026,10 +1081,11 @@ const Term = struct {
     //for example from 5 to 10 lines are dirty
     inline fn set_dirt(self: *Term, top: u16, bot: u16) void {
         const rows = self.window.tty_grid.getRows().?;
-        if (top > bot or bot >= rows) return;
+        if (top > bot or bot >= rows or c.MAX_ROWS == 0) return;
         const start = top;
         const end = @min(bot, rows - 1);
-        self.dirty.setRangeValue(.{ .start = start, .end = end + 1 }, true);
+        const one: usize = 1;
+        self.dirty.setRangeValue(.{ .start = start, .end = end + one }, true);
     }
 
     inline fn fulldirt(self: *Term) void {
@@ -1037,7 +1093,7 @@ const Term = struct {
     }
     // NOTE: Calculates the length of the string, ignoring end spaces.
     inline fn linelen(self: *Term, y: u32) u32 {
-        var i = self.size_grid.cols;
+        var i = self.window.tty_grid.getCols().?;
 
         if (self.line[y][i - 1].mode.isSet((Glyph_flags.ATTR_WRAP)))
             return i;
@@ -1046,6 +1102,7 @@ const Term = struct {
 
         return i;
     }
+
     // NOTE: Processes graphic rendering parameters (colors, styles).
     inline fn handle_sgr(self: *Term, params: []u32) void {
         var i: usize = 0;
@@ -1061,7 +1118,7 @@ const Term = struct {
                 7 => self.cursor.attr.mode.set(.ATTR_REVERSE),
                 8 => self.cursor.attr.mode.set(.ATTR_INVISIBLE),
                 9 => self.cursor.attr.mode.set(.ATTR_STRUCK),
-                22 => self.cursor.attr.mode.unset(.{ .ATTR_BOLD, .ATTR_FAINT }),
+                22 => self.cursor.attr.mode.unset(.ATTR_BOLD),
                 23 => self.cursor.attr.mode.unset(.ATTR_ITALIC),
                 24 => self.cursor.attr.mode.unset(.ATTR_UNDERLINE),
                 25 => self.cursor.attr.mode.unset(.ATTR_BLINK),
@@ -1635,7 +1692,15 @@ pub const rect = struct {
     //
     // rect.full: x = -2, y = -1, width = 6, height = 3
     // rect.grid: cols = 5, rows = 3 (within the full rect or window)
-    //
+    //+-----+-----+-----+-----+-----+
+    // |     |     |     |     |     |  ← row 0
+    // +-----+-----+-----+-----+-----+
+    // |     |     |     |     |     |  ← row 1
+    // +-----+-----+-----+-----+-----+
+    // |     |     |     |     |     |  ← row 2
+    // +-----+-----+-----+-----+-----+
+    //   ↑     ↑     ↑     ↑     ↑
+    //  col 0 col 1 col 2 col 3 col 4
     data: union(enum) {
         full: struct { // full is basic rectangle
             x: i16,
@@ -1771,6 +1836,77 @@ pub const rect = struct {
             },
             .grid => {
                 std.log.warn("cannot add y  into grid which provides only cols and rows", .{});
+            },
+        }
+    }
+
+    inline fn addWidth(self: *rect, width: u16) void {
+        switch (self.data) {
+            .full => |*f| {
+                f.width = width;
+            },
+            .position => {
+                std.log.warn("cannot add width into position which provides only x and y", .{});
+            },
+            .size => |*s| {
+                s.width = width;
+            },
+            .grid => {
+                std.log.warn("cannot add width  into grid which provides only cols and rows; use cols and rows instead", .{});
+            },
+        }
+    }
+
+    inline fn addCols(self: *rect, cols: u16) void {
+        switch (self.data) {
+            .full => {
+                std.log.warn("cannot add cols into full which provides only rectangle", .{});
+            },
+
+            .position => {
+                std.log.warn("cannot add cols into position which provides only x and y", .{});
+            },
+            .size => {
+                std.log.warn("cannot add cols to size, which provide only width and height", .{});
+            },
+            .grid => |*g| {
+                g.cols = cols;
+            },
+        }
+    }
+
+    inline fn addRows(self: *rect, rows: u16) void {
+        switch (self.data) {
+            .full => {
+                std.log.warn("cannot add rows into full which provides only rectangle", .{});
+            },
+
+            .position => {
+                std.log.warn("cannot add rows into position which provides only x and y", .{});
+            },
+            .size => {
+                std.log.warn("cannot add rows to size, which provide only width and height", .{});
+            },
+            .grid => |*g| {
+                g.rows = rows;
+            },
+        }
+    }
+
+    inline fn addHeight(self: *rect, height: u16) void {
+        switch (self.data) {
+            .full => |*f| {
+                f.height = height;
+            },
+
+            .position => {
+                std.log.warn("cannot add height into position which provides only x and y", .{});
+            },
+            .size => |*s| {
+                s.height = height;
+            },
+            .grid => {
+                std.log.warn("cannot add height  into grid which provides only cols and rows; use cols and rows instead", .{});
             },
         }
     }
@@ -2236,8 +2372,8 @@ pub const XlibTerminal = struct {
     // Data is buffered and sent to PTY via ttywrite.
     // Logging is added for debugging.
     fn tdump(self: *Self) void {
-        const cols = self.term.size_grid.cols;
-        const rows = self.term.size_grid.rows;
+        const cols = self.term.window.tty_grid.getCols().?;
+        const rows = self.term.window.tty_grid.getRows().?;
         var buffer: [4096]u8 = undefined;
         var buf_pos: usize = 0;
 
@@ -2272,17 +2408,18 @@ pub const XlibTerminal = struct {
     // Characters are converted to UTF-8, empty spaces are ignored.
     // An \n is added to the end of the line.
     // Data is sent via ttywrite.
-    fn tdumpline(self: *Self, y: u16) void {
-        if (y >= self.term.size_grid.rows) {
+    fn tdumpline(self: *Self, y: i16) void {
+        assert(y > 0);
+        if (y >= self.term.window.tty_grid.getRows().?) {
             std.log.warn("tdumpline: Invalid row index {}", .{y});
             return;
         }
 
-        const cols = self.term.size_grid.cols;
+        const cols = self.term.window.tty_grid.getCols().?;
         var buffer: [4096]u8 = undefined;
         var buf_pos: usize = 0;
 
-        for (self.term.line[y][0..cols]) |glyph| {
+        for (self.term.line[@intCast(y)][0..cols]) |glyph| {
             if (glyph.u == ' ') continue;
 
             const utf8_len = util.utf8Encode(u32, glyph.u, buffer[buf_pos..]);
@@ -2316,17 +2453,17 @@ pub const XlibTerminal = struct {
 
         // std.log.debug("tdumpsel: Dumped selection of length {}", .{selected_text.len});
     }
-    fn csihandle(self: *Self, csi: *CSIEscape) void {
+    fn csihandle(self: *Self, csi: *CSIEscape) !void {
         const params = csi.params[0..csi.narg];
         switch (csi.mode[0]) {
-            '@' => self.term.csi_ich(params), // insert characters
-            'A' => self.term.csi_cuu(params), // cursor up
+            '@' => try self.term.csi_ich(params), // insert characters
+            'A' => try self.term.csi_cuu(params), // cursor up
             'B', 'e' => self.term.csi_cud(params), //
             'i' => self.term.csi_mc(params, self),
             'c' => self.term.csi_da(params, self),
             'b' => self.term.csi_rep(params),
             'C', 'a' => self.term.csi_cuf(params),
-            'D' => self.term.csi_cub(params),
+            'D' => try self.term.csi_cub(params),
             'E' => self.term.csi_cnl(params),
             'F' => self.term.csi_cpl(params),
             'g' => self.term.csi_tbc(params),
@@ -2338,13 +2475,13 @@ pub const XlibTerminal = struct {
             'S' => if (csi.priv == 0) self.term.csi_su(params) else std.log.warn("Unknown private SU sequence", .{}),
             'T' => self.term.csi_sd(params),
             'L' => self.term.csi_il(params),
-            'l' => self.term.csi_rm(params, csi.narg, csi.priv, &self.win.mode),
+            'l' => self.term.csi_rm(params, csi.narg, csi.priv, &self.term.window.mode),
             'M' => self.term.csi_dl(params),
             'X' => self.term.csi_ech(params),
             'P' => self.term.csi_dch(params),
             'Z' => self.term.csi_cbt(params),
             'd' => self.term.csi_vpa(params),
-            'h' => self.term.csi_sm(params, csi.narg, csi.priv, &self.win.mode),
+            'h' => self.term.csi_sm(params, csi.narg, csi.priv, &self.term.window.mode),
             'm' => {
                 if (csi.narg == 0) {
                     self.term.handle_sgr(params);
@@ -2446,7 +2583,7 @@ pub const XlibTerminal = struct {
                 if (self.term.esc_mode.isSet(.ESC_START)) {
                     var utf8_buf: [4]u8 = undefined;
                     const len = util.utf8Encode(u32, codepoint, &utf8_buf);
-                    self.term.csi_escape.parse_esc(self, utf8_buf[0..len]);
+                    try self.term.csi_escape.parse_esc(self, utf8_buf[0..len]);
                     continue;
                 }
 
@@ -2456,23 +2593,23 @@ pub const XlibTerminal = struct {
                         continue;
                     },
                     '\n' => {
-                        self.term.cursor.pos.x = 0;
-                        if (self.term.cursor.pos.y < self.term.size_grid.rows - 1) {
-                            self.term.cursor.pos.y += 1;
+                        self.term.cursor.pos.addX(0);
+                        if (self.term.cursor.pos.getY().? < self.term.window.tty_grid.getRows().? - 1) {
+                            self.term.cursor.pos.data.position.y += 1;
                         } else {
                             self.scrollUp(1);
                         }
-                        self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
+                        self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
                     },
                     '\r' => {
-                        self.term.cursor.pos.x = 0;
-                        self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
+                        self.term.cursor.pos.addX(0);
+                        self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
                     },
                     '\x08' => {
-                        if (self.term.cursor.pos.x > 0) {
-                            self.term.cursor.pos.x -= 1;
-                            self.term.line[self.term.cursor.pos.y][self.term.cursor.pos.x] = Glyph.initEmpty();
-                            self.term.set_dirt(self.term.cursor.pos.y, self.term.cursor.pos.y);
+                        if (self.term.cursor.pos.getX().? > 0) {
+                            self.term.cursor.pos.data.position.x -= 1;
+                            self.term.line[@intCast(self.term.cursor.pos.getY().?)][@intCast(self.term.cursor.pos.getX().?)] = Glyph.initEmpty();
+                            self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
                         }
                     },
                     '\t' => self.term.tputtab(1),
@@ -2967,8 +3104,8 @@ pub const XlibTerminal = struct {
     }
 
     pub fn set_size_hints(self: *XlibTerminal) void {
-        const char_width = self.dc.font.size.width;
-        const char_height = self.dc.font.size.height;
+        const char_width = self.dc.font.size.getWidth().?;
+        const char_height = self.dc.font.size.getHeight().?;
         const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
         const hints = [_]u32{
             char_width, // width_inc
@@ -3138,8 +3275,8 @@ pub const XlibTerminal = struct {
                     try self.pty.resize(new_size);
                     try self.resize(@intCast(config_event.width), @intCast(config_event.height));
                     try self.term.resize(new_size.ws_col, new_size.ws_row);
-                    self.win.win_size.width = config_event.width;
-                    self.win.win_size.height = config_event.height;
+                    self.term.window.win_size.addWidth(config_event.width);
+                    self.term.window.win_size.addHeight(config_event.height);
                     self.set_size_hints();
                 }
             },
@@ -3193,18 +3330,18 @@ pub const XlibTerminal = struct {
         );
     }
 
-    pub inline fn resize(self: *XlibTerminal, width: u16, height: u16) !void {
-        self.win.win_size.width = width;
-        self.win.win_size.height = height;
+    inline fn resize(self: *XlibTerminal, width: u16, height: u16) !void {
+        self.term.window.win_size.addWidth(width);
+        self.term.window.win_size.addHeight(height);
 
         const borderpx = if (c.borderpx <= 0) 1 else @as(u16, @intCast(c.borderpx));
-        const char_width = self.dc.font.size.width;
-        const char_height = self.dc.font.size.height;
+        const char_width = self.dc.font.size.getWidth().?;
+        const char_height = self.dc.font.size.getHeight().?;
         const cols = @max(1, @as(u16, @intCast((width - 2 * borderpx) / char_width)));
         const rows = @max(1, @as(u16, @intCast((height - 2 * borderpx) / char_height)));
 
-        self.term.size_grid.cols = cols;
-        self.term.size_grid.rows = rows;
+        self.term.window.tty_grid.addCols(cols);
+        self.term.window.tty_grid.addRows(rows);
 
         _ = c.xcb_free_pixmap(self.connection, self.pixmap);
         self.pixmap = c.xcb_generate_id(self.connection);
@@ -3325,7 +3462,11 @@ pub const XlibTerminal = struct {
 
 test "Term dirty row handling" {
     const allocator = std.testing.allocator;
-    var term = try Term.init(allocator, 80, 24);
+    const win: TermWindow = .{
+        .mode = WinMode.initEmpty(),
+        .tty_grid = rect.initGrid(80, 24),
+    };
+    var term = try Term.init(allocator, win);
 
     // Test set_dirt
     term.set_dirt(5, 10);

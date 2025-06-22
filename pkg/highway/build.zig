@@ -21,7 +21,6 @@ pub fn build(b: *std.Build) !void {
         "-march=native",
 
         "-Wno-builtin-macro-redefined",
-        // "-DHWY_DISABLED_TARGETS=HWY_AVX3_SPR|HWY_AVX3_ZEN4", //temp make TODO:this auto
         "-D__DATE__=\"redacted\"",
         "-D__TIMESTAMP__=\"redacted\"",
         "-D__TIME__=\"redacted\"",

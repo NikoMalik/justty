@@ -441,7 +441,7 @@ void simd_copy_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
         HWY_DYNAMIC_DISPATCH(CopyBytesImpl)(src, dst, len);
 }
 
-void move_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
+void simd_move_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
     HWY_DYNAMIC_DISPATCH(MoveBytesImpl)(src, dst, len);
 }
 

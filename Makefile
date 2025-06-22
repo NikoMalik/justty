@@ -2,11 +2,8 @@ fast:
 	@zig build -Doptimize=ReleaseFast 
 
 test:
-	@zig build test
+	@zig build test -Dcpu=native
 
-prepare:
-	@chmod +x setup_cgroups.sh
-	@sudo ./setup_cgroups.sh
 
 try: fast
 	@./zig-out/bin/justty

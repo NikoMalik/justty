@@ -20,6 +20,8 @@ fn addDep(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
+    artifact.addAssemblyFile(b.path("asm_memmove.S"));
+    artifact.addAssemblyFile(b.path("asm_memcpy.S"));
     artifact.addIncludePath(b.path("./include"));
     artifact.addIncludePath(b.path("./config/"));
     artifact.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
@@ -37,6 +39,44 @@ fn addDep(
 
     artifact.linkLibCpp();
     artifact.linkLibC();
+
+    const has_avx2 = std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
+    if (has_avx2) {
+        const asm_step = b.addSystemCommand(&.{
+            "zig",
+            "cc",
+            "-c",
+            "asm_folly.S",
+            "-o",
+            "folly.o",
+            "-D__AVX2__",
+            // "-DFOLLY_MEMCPY_IS_MEMCPY",
+            "-mtune=native",
+            "-fno-exceptions",
+            "-g0",
+        });
+        artifact.step.dependOn(&asm_step.step);
+        artifact.addObjectFile(b.path("folly.o"));
+
+        const asm_step2 = b.addSystemCommand(&.{
+            "zig",
+            "cc",
+            "-c",
+            "asm_folly_memset.S",
+            "-o",
+            "folly_memset.o",
+            "-D__AVX2__",
+            // "-DFOLLY_MEMCPY_IS_MEMCPY",
+            "-mtune=native",
+            "-fno-exceptions",
+            "-g0",
+        });
+        artifact.step.dependOn(&asm_step2.step);
+        artifact.addObjectFile(b.path("folly_memset.o"));
+    }
+
+    // Include the preprocessed assembly file
+    // artifact.addAssemblyFile(b.path("asm_folly.S"));
     const HWY_AVX3_SPR: c_int = 1 << 4;
     const HWY_AVX3_ZEN4: c_int = 1 << 6;
     const HWY_AVX3_DL: c_int = 1 << 7;
