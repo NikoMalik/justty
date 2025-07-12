@@ -7,21 +7,19 @@
 #include <cassert>
 #include <algorithm> // For std::min
 
-
-
 HWY_BEFORE_NAMESPACE();
 namespace HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 using D8 = hn::ScalableTag<uint8_t>;
-HWY_ATTR size_t IndexOfCharImpl(const uint8_t* HWY_RESTRICT haystack, size_t haystack_len, uint8_t needle) { //from bun
+HWY_ATTR size_t IndexOfCharImpl(const uint8_t *HWY_RESTRICT haystack, size_t haystack_len, uint8_t needle) { // from bun
 
     D8 d;
     const size_t pos = hn::Find<D8>(d, needle, haystack, haystack_len);
     return (pos < haystack_len) ? pos : haystack_len;
 }
 
-HWY_ATTR bool CompareImpl(const uint8_t* a, const uint8_t* b, size_t len) {
+HWY_ATTR bool CompareImpl(const uint8_t *a, const uint8_t *b, size_t len) {
     D8 d;
 
     size_t i = 0;
@@ -29,16 +27,17 @@ HWY_ATTR bool CompareImpl(const uint8_t* a, const uint8_t* b, size_t len) {
     for (; i + N <= len; i += N) {
         auto va = hn::LoadN(d, a + i, N);
         auto vb = hn::LoadN(d, b + i, N);
-        if (!hn::AllTrue(d, hn::Eq(va, vb))) return false;
+        if (!hn::AllTrue(d, hn::Eq(va, vb)))
+            return false;
     }
     for (; i < len; ++i) {
-        if (a[i] != b[i]) return false;
+        if (a[i] != b[i])
+            return false;
     }
     return true;
 }
 
-
-HWY_ATTR size_t LastIndexOfByte(const uint8_t* data, size_t len, uint8_t value) {
+HWY_ATTR size_t LastIndexOfByte(const uint8_t *data, size_t len, uint8_t value) {
     assert(len > 0);
     D8 d;
     const size_t lanes = hn::Lanes(d);
@@ -47,21 +46,22 @@ HWY_ATTR size_t LastIndexOfByte(const uint8_t* data, size_t len, uint8_t value) 
     while (i >= lanes) {
         i -= lanes;
         const auto vec = hn::LoadU(d, data + i);
-        const auto mask = vec == hn::Set(d, value); 
-        intptr_t pos = hn::FindFirstTrue(d, mask); 
+        const auto mask = vec == hn::Set(d, value);
+        intptr_t pos = hn::FindFirstTrue(d, mask);
         if (pos >= 0) {
-            return i + static_cast<size_t>(pos); 
+            return i + static_cast<size_t>(pos);
         }
     }
 
     while (i > 0) {
         --i;
-        if (data[i] == value) return i;
+        if (data[i] == value)
+            return i;
     }
 
-    return 0; 
+    return 0;
 }
-HWY_ATTR size_t IndexOfCsiStartImpl(const uint8_t* input, size_t len) {
+HWY_ATTR size_t IndexOfCsiStartImpl(const uint8_t *input, size_t len) {
     D8 d;
     const size_t N = hn::Lanes(d);
     const auto esc = hn::Set(d, 0x1B);
@@ -72,16 +72,17 @@ HWY_ATTR size_t IndexOfCsiStartImpl(const uint8_t* input, size_t len) {
         auto v2 = hn::LoadN(d, input + i + 1, N);
         auto mask = hn::And(hn::Eq(v1, esc), hn::Eq(v2, bracket));
         intptr_t pos = hn::FindFirstTrue(d, mask);
-        if (pos >= 0) return i + pos;
+        if (pos >= 0)
+            return i + pos;
     }
     for (; i < len - 1; i++) {
-        if (input[i] == 0x1B && input[i + 1] == 0x5B) return i;
+        if (input[i] == 0x1B && input[i + 1] == 0x5B)
+            return i;
     }
     return len;
 }
 
-
-HWY_ATTR size_t ExtractCsiSeqImpl(const uint8_t* input, size_t len, size_t start, size_t* end) {
+HWY_ATTR size_t ExtractCsiSeqImpl(const uint8_t *input, size_t len, size_t start, size_t *end) {
     // Validate CSI prefix: ESC (0x1B) followed by '['
     if (start + 1 >= len || input[start] != 0x1B || input[start + 1] != '[') {
         return 0;
@@ -110,9 +111,45 @@ HWY_ATTR size_t ExtractCsiSeqImpl(const uint8_t* input, size_t len, size_t start
         }
     }
     return 0;
+
+    /* example
+
+    void ParseInput(const std::vector<uint8_t>& input) {
+    size_t pos = 0;
+    while (pos < input.size()) {
+        size_t end = 0;
+        size_t seq_len = ExtractCsiSeqImpl(input.data(), input.size(), pos, &end);
+        if (seq_len == 0) {
+            // no CSI,skip one byte
+            std::cout << "Non-CSI byte: " << std::hex << (int)input[pos] << std::endl;
+            pos++;
+        } else {
+            // found CSI
+            std::cout << "Found CSI sequence: ";
+            for (size_t i = pos; i < end; ++i) {
+                std::cout << (char)input[i];
+            }
+            std::cout << std::endl;
+            pos = end;
+        }
+    }
 }
-size_t IndexOfSpaceOrNewlineOrNonASCIIImpl(const uint8_t* HWY_RESTRICT start_ptr, size_t search_len)
-{
+
+    int main() {
+    std::vector<uint8_t> input = {
+        0x1B, '[', '3', '1', 'm',       // ESC[31m (red)
+        'H', 'e', 'l', 'l', 'o',        // text "Hello"
+        0x1B, '[', '0', 'm'             // ESC[0m (reset)
+    };
+
+    ParseInput(input);
+    return 0;
+}
+    *
+    *
+    */
+}
+size_t IndexOfSpaceOrNewlineOrNonASCIIImpl(const uint8_t *HWY_RESTRICT start_ptr, size_t search_len) {
     assert(search_len > 0);
 
     D8 d;
@@ -121,7 +158,7 @@ size_t IndexOfSpaceOrNewlineOrNonASCIIImpl(const uint8_t* HWY_RESTRICT start_ptr
     const uint8_t after_space = ' ' + 1;
 
     const auto vec_min_ascii_including_space = hn::Set(d, after_space);
-    const auto vec_max_ascii = hn::Set(d, uint8_t { 127 });
+    const auto vec_max_ascii = hn::Set(d, uint8_t{127});
     size_t simd_text_len = search_len - (search_len % N);
 
     size_t i = 0;
@@ -146,17 +183,16 @@ size_t IndexOfSpaceOrNewlineOrNonASCIIImpl(const uint8_t* HWY_RESTRICT start_ptr
     return search_len;
 }
 
-bool ContainsNewlineOrNonASCIIOrQuoteImpl(const uint8_t* HWY_RESTRICT text, size_t text_len)
-{
+bool ContainsNewlineOrNonASCIIOrQuoteImpl(const uint8_t *HWY_RESTRICT text, size_t text_len) {
     assert(text_len > 0);
 
     D8 d;
     const size_t N = hn::Lanes(d);
 
     // SIMD constants
-    const auto vec_max_ascii = hn::Set(d, uint8_t { 127 });
-    const auto vec_min_ascii = hn::Set(d, uint8_t { 0x20 });
-    const auto vec_quote = hn::Set(d, uint8_t { '"' });
+    const auto vec_max_ascii = hn::Set(d, uint8_t{127});
+    const auto vec_min_ascii = hn::Set(d, uint8_t{0x20});
+    const auto vec_quote = hn::Set(d, uint8_t{'"'});
 
     size_t i = 0;
     const size_t simd_text_len = text_len - (text_len % N);
@@ -187,9 +223,9 @@ bool ContainsNewlineOrNonASCIIOrQuoteImpl(const uint8_t* HWY_RESTRICT text, size
     return false;
 }
 
-
-HWY_ATTR void CopyBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
-    if (len == 0) return;
+HWY_ATTR void CopyBytesImpl(const uint8_t *src, uint8_t *dst, size_t len) {
+    if (len == 0)
+        return;
     D8 d;
     size_t i = 0;
     const size_t N = hn::Lanes(d);
@@ -202,9 +238,7 @@ HWY_ATTR void CopyBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
     }
 }
 
-
-
-HWY_ATTR void MoveBytesBackward(const uint8_t* src, uint8_t* dst, size_t len) {
+HWY_ATTR void MoveBytesBackward(const uint8_t *src, uint8_t *dst, size_t len) {
     D8 d;
     size_t i = len;
     const size_t N = hn::Lanes(d);
@@ -219,8 +253,9 @@ HWY_ATTR void MoveBytesBackward(const uint8_t* src, uint8_t* dst, size_t len) {
     }
 }
 
-HWY_ATTR void MoveBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
-    if (len == 0) return;
+HWY_ATTR void MoveBytesImpl(const uint8_t *src, uint8_t *dst, size_t len) {
+    if (len == 0)
+        return;
 
     // check overlaps
     if (dst <= src || dst >= src + len) {
@@ -230,9 +265,7 @@ HWY_ATTR void MoveBytesImpl(const uint8_t* src, uint8_t* dst, size_t len) {
     }
 }
 
-
-
-HWY_ATTR void ToUpperImpl(uint8_t* text, size_t len) {
+HWY_ATTR void ToUpperImpl(uint8_t *text, size_t len) {
     D8 d;
     const auto lower_a = hn::Set(d, uint8_t('a'));
     const auto lower_z = hn::Set(d, uint8_t('z'));
@@ -251,9 +284,10 @@ HWY_ATTR void ToUpperImpl(uint8_t* text, size_t len) {
         }
     }
 }
-HWY_ATTR size_t IndexOfAnyCharImpl(const uint8_t* HWY_RESTRICT text, size_t text_len, const uint8_t* HWY_RESTRICT chars, size_t chars_len) { //from bun
+HWY_ATTR size_t IndexOfAnyCharImpl(const uint8_t *HWY_RESTRICT text, size_t text_len, const uint8_t *HWY_RESTRICT chars, size_t chars_len) { // from bun
 
-    if (text_len == 0) return 0;
+    if (text_len == 0)
+        return 0;
     D8 d;
     const size_t N = hn::Lanes(d);
 
@@ -326,10 +360,8 @@ HWY_ATTR size_t IndexOfAnyCharImpl(const uint8_t* HWY_RESTRICT text, size_t text
         return text_len;
     }
 }
-}  // namespace HWY_NAMESPACE
+} // namespace HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();
-
-
 
 extern "C" {
 
@@ -345,44 +377,31 @@ HWY_EXPORT(IndexOfCsiStartImpl);
 HWY_EXPORT(ExtractCsiSeqImpl);
 HWY_EXPORT(MoveBytesImpl);
 
-
-
-
-
-
-size_t simd_base64_max_length(const char* input, size_t length) {
+size_t simd_base64_max_length(const char *input, size_t length) {
     return simdutf::maximal_binary_length_from_base64(input, length);
 }
 
-
-bool simd_contains_newline_or_non_ascii_or_quote(const uint8_t* HWY_RESTRICT text, size_t text_len)
-{
+bool simd_contains_newline_or_non_ascii_or_quote(const uint8_t *HWY_RESTRICT text, size_t text_len) {
     return HWY_DYNAMIC_DISPATCH(ContainsNewlineOrNonASCIIOrQuoteImpl)(text, text_len);
 }
 
-size_t simd_index_of_csi_start(const uint8_t* input, size_t len) {
+size_t simd_index_of_csi_start(const uint8_t *input, size_t len) {
     return HWY_DYNAMIC_DISPATCH(IndexOfCsiStartImpl)(input, len);
 }
 
-
-size_t simd_extract_csi_sequence(const uint8_t* input, size_t len, size_t start, size_t* end) {
+size_t simd_extract_csi_sequence(const uint8_t *input, size_t len, size_t start, size_t *end) {
     return HWY_DYNAMIC_DISPATCH(ExtractCsiSeqImpl)(input, len, start, end);
 }
 
-
-size_t simd_last_index_of_byte(const uint8_t* input, size_t len,uint8_t value)
- {
-     return HWY_DYNAMIC_DISPATCH(LastIndexOfByte)(input,len,value);
+size_t simd_last_index_of_byte(const uint8_t *input, size_t len, uint8_t value) {
+    return HWY_DYNAMIC_DISPATCH(LastIndexOfByte)(input, len, value);
 }
 
-
-
-size_t simd_index_of_space_or_newline_or_non_ascii(const uint8_t* HWY_RESTRICT text, size_t text_len)
-{
+size_t simd_index_of_space_or_newline_or_non_ascii(const uint8_t *HWY_RESTRICT text, size_t text_len) {
     return HWY_DYNAMIC_DISPATCH(IndexOfSpaceOrNewlineOrNonASCIIImpl)(text, text_len);
 }
 
-size_t simd_base64_decode(const char* input, size_t length, char* output) {
+size_t simd_base64_decode(const char *input, size_t length, char *output) {
     simdutf::result r = simdutf::base64_to_binary(input, length, output);
     if (r.error) {
         return -1;
@@ -390,63 +409,58 @@ size_t simd_base64_decode(const char* input, size_t length, char* output) {
     return r.count;
 }
 
-bool simd_validate_ascii(const char* buf, size_t len) {
+bool simd_validate_ascii(const char *buf, size_t len) {
     return simdutf::validate_ascii(buf, len);
 }
 
-bool simd_validate_utf8(const char* buf, size_t len) {
+bool simd_validate_utf8(const char *buf, size_t len) {
     return simdutf::validate_utf8(buf, len);
 }
 
-size_t simd_convert_utf8_to_utf32(const char* input, size_t length, char32_t* output) {
+size_t simd_convert_utf8_to_utf32(const char *input, size_t length, char32_t *output) {
     return simdutf::convert_utf8_to_utf32(input, length, output);
 }
 
-size_t simd_utf32_len_from_utf8(const char* input, size_t length) {
+size_t simd_utf32_len_from_utf8(const char *input, size_t length) {
     return simdutf::utf32_length_from_utf8(input, length);
 }
 
-size_t simd_convert_utf32_to_utf8(const char32_t* input, size_t len, char* output) {
+size_t simd_convert_utf32_to_utf8(const char32_t *input, size_t len, char *output) {
     return simdutf::convert_utf32_to_utf8(input, len, output);
 }
 
-size_t simd_index_of_char(const uint8_t* haystack, size_t haystack_len, uint8_t needle) {
+size_t simd_index_of_char(const uint8_t *haystack, size_t haystack_len, uint8_t needle) {
     return HWY_DYNAMIC_DISPATCH(IndexOfCharImpl)(haystack, haystack_len, needle);
 }
 
-
-size_t simd_index_of_any_char(const uint8_t* text, size_t text_len, const uint8_t* chars, size_t chars_len) {
+size_t simd_index_of_any_char(const uint8_t *text, size_t text_len, const uint8_t *chars, size_t chars_len) {
     return HWY_DYNAMIC_DISPATCH(IndexOfAnyCharImpl)(text, text_len, chars, chars_len);
 }
 
-
-int simd_detect_encodings(const char* input, size_t length) {
+int simd_detect_encodings(const char *input, size_t length) {
     return static_cast<int>(simdutf::detect_encodings(input, length));
 }
 
-
-
-size_t simd_count_utf8(const char* input, size_t length) {
+size_t simd_count_utf8(const char *input, size_t length) {
     return simdutf::count_utf8(input, length);
 }
 
-
-bool simd_compare(const uint8_t* a, size_t a_len, const uint8_t* b, size_t b_len) {
-    if (a_len != b_len) return false;
+bool simd_compare(const uint8_t *a, size_t a_len, const uint8_t *b, size_t b_len) {
+    if (a_len != b_len)
+        return false;
     return HWY_DYNAMIC_DISPATCH(CompareImpl)(a, b, a_len);
 }
 
-
-void simd_copy_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
-        HWY_DYNAMIC_DISPATCH(CopyBytesImpl)(src, dst, len);
+void simd_copy_bytes(const uint8_t *src, uint8_t *dst, size_t len) {
+    HWY_DYNAMIC_DISPATCH(CopyBytesImpl)(src, dst, len);
 }
 
-void simd_move_bytes(const uint8_t* src, uint8_t* dst, size_t len) {
+void simd_move_bytes(const uint8_t *src, uint8_t *dst, size_t len) {
     HWY_DYNAMIC_DISPATCH(MoveBytesImpl)(src, dst, len);
 }
 
-void simd_to_upper(uint8_t* text, size_t len) {
-        HWY_DYNAMIC_DISPATCH(ToUpperImpl)(text, len);
+void simd_to_upper(uint8_t *text, size_t len) {
+    HWY_DYNAMIC_DISPATCH(ToUpperImpl)(text, len);
 }
 
-}  // extern "C"
+} // extern "C"
