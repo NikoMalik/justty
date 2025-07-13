@@ -228,8 +228,6 @@ pub const XRenderFont = struct {
         // Render to buffer
         rasterized.renderToBuf(buf, x, y, color_img);
 
-        buf.clear(0xFF0000FF);
-
         // Draw to screen
         try buf.draw();
     }

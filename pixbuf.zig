@@ -102,26 +102,22 @@ pub const Buf = struct {
 
     const Self = @This();
 
-    const MFD_NOEXEC_SEAL: u32 = if (@hasDecl(linux.MFD, "NOEXEC_SEAL"))
-        linux.MFD.NOEXEC_SEAL
-    else
-        0x0000;
     const F_ADD_SEALS = if (@hasDecl(posix.F, "ADD_SEALS"))
         posix.F.ADD_SEALS
     else
-        1025;
+        0x0000;
     const F_SEAL_GROW = if (@hasDecl(posix.F, "SEAL_GROW"))
         posix.F.SEAL_GROW
     else
-        0x0004;
+        0x0000;
     const F_SEAL_SHRINK = if (@hasDecl(posix.F, "SEAL_SHRINK"))
         posix.F.SEAL_SHRINK
     else
-        0x0002;
+        0x0000;
     const F_SEAL_SEAL = if (@hasDecl(posix.F, "SEAL_SEAL"))
         posix.F.SEAL_SEAL
     else
-        0x0008;
+        0x0000;
 
     pub fn init(
         allocator: Allocator,
@@ -146,8 +142,7 @@ pub const Buf = struct {
             shm_seg = c.xcb_generate_id(conn);
             pixmap = c.xcb_generate_id(conn);
 
-            const flags = linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING |
-                MFD_NOEXEC_SEAL;
+            const flags = linux.MFD.CLOEXEC | linux.MFD.ALLOW_SEALING;
 
             var pool_fd: usize = undefined;
             if (comptime build_options.memfd) {
@@ -155,14 +150,8 @@ pub const Buf = struct {
                     "justty-shm",
                     flags,
                 );
-
-                if (pool_fd < 0) {
-                    pool_fd = linux.memfd_create(
-                        "justty-shm",
-                        posix.MFD.CLOEXEC | posix.MFD.ALLOW_SEALING,
-                    );
-                }
             } else {
+                std.log.info("memfd not available", .{});
                 pool_fd = try create_shm_file(size);
             }
 
@@ -200,7 +189,7 @@ pub const Buf = struct {
                 container,
                 w,
                 h,
-                32,
+                screen.*.root_depth,
                 shm_seg,
                 0,
             );
@@ -218,6 +207,9 @@ pub const Buf = struct {
             }
 
             std.log.info("complete init buffer", .{});
+            std.log.info("w={d}, h={d}, stride={d}, size={d}", .{ w, h, w * 4, size });
+            std.log.info("memfd_create fd={d}", .{pool_fd});
+            std.log.info("mmap ptr={*}", .{mmapped.ptr});
 
             return Self{
                 .conn = conn,
@@ -358,9 +350,8 @@ pub const Buf = struct {
                 cont_h,
             );
         }
-
         if (self.is_shm) {
-            _ = c.xcb_copy_area(
+            const copy_cookie = c.xcb_copy_area(
                 self.conn,
                 self.shm.base.pixmap,
                 self.container.drawable,
@@ -369,9 +360,13 @@ pub const Buf = struct {
                 0,
                 self.x,
                 self.y,
-                0,
-                0,
+                self.width,
+                self.height,
             );
+            if (c.xcb_request_check(self.conn, copy_cookie) != null) {
+                std.log.err("Failed to copy area in SHM mode", .{});
+                return error.CopyAreaFailed;
+            }
         } else {
             _ = c.xcb_image_put(
                 self.conn,
