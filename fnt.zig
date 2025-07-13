@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @import("c.zig");
 const Allocator = std.mem.Allocator;
 const Buf = @import("pixbuf.zig");
+const cache_pixman = @import("pixman_cache.zig");
 
 const fcft = @cImport({
     @cInclude("fcft/stride.h");
@@ -22,139 +23,10 @@ pub const XcbftError = error{
 
 var font_name_buffer: [1][*c]const u8 = undefined;
 
-const RasterizedGlyph = struct {
-    glyph: *fcft.fcft_glyph,
-    x: i32, // Horizontal position
-    kern: i32, // Kerning adjustment
-};
-
-const RasterizedText = struct {
-    glyphs: []RasterizedGlyph,
-    total_width: i32,
-    total_height: i32,
-    ascent: i32,
-
-    fn renderToBuf(self: @This(), buf: *Buf.Buf, dx: i32, dy: i32, color_img: ?*c.pixman_image_t) void {
-        var x: i32 = dx;
-        const y: i32 = dy + self.ascent; // Adjust for baseline
-
-        var clip_region: c.pixman_region32_t = undefined;
-        c.pixman_region32_init_rect(
-            &clip_region,
-            0,
-            0,
-            @intCast(buf.width),
-            @intCast(buf.height),
-        );
-        defer c.pixman_region32_fini(&clip_region);
-
-        _ = c.pixman_image_set_clip_region32(buf.pixman_image, &clip_region);
-
-        for (self.glyphs) |g| {
-            const glyph = g.glyph;
-
-            x += g.kern;
-            const glyph_x = x + g.x;
-            const glyph_y = y - glyph.y;
-
-            if (glyph_x + @as(i32, @intCast(glyph.width)) < 0 or
-                glyph_y + @as(i32, @intCast(glyph.height)) < 0 or
-                glyph_x >= @as(i32, @intCast(buf.width)) or
-                glyph_y >= @as(i32, @intCast(buf.height)))
-            {
-                x += glyph.advance.x;
-                continue;
-            }
-
-            if (glyph.is_color_glyph) {
-                // Render color glyph (e.g., emoji) directly
-                c.pixman_image_composite32(
-                    c.PIXMAN_OP_OVER,
-                    @ptrCast(glyph.pix),
-                    null,
-                    buf.pixman_image,
-                    0,
-                    0,
-                    0,
-                    0,
-                    glyph_x,
-                    glyph_y,
-                    @intCast(glyph.width),
-                    @intCast(glyph.height),
-                );
-            } else if (color_img) |color| {
-                // Render monochrome glyph with specified color
-                c.pixman_image_composite32(
-                    c.PIXMAN_OP_OVER,
-                    color,
-                    @ptrCast(glyph.pix),
-                    buf.pixman_image,
-                    0,
-                    0,
-                    0,
-                    0,
-                    glyph_x,
-                    glyph_y,
-                    @intCast(glyph.width),
-                    @intCast(glyph.height),
-                );
-            }
-
-            x += glyph.advance.x;
-        }
-
-        _ = c.pixman_image_set_clip_region32(buf.pixman_image, null);
-    }
-    fn deinit(self: @This(), allocator: Allocator) void {
-        allocator.free(self.glyphs);
-    }
-};
-
-pub fn rasterizeText(
-    font: *fcft.fcft_font,
-    text: []const u32,
-    allocator: Allocator,
-) !RasterizedText {
-    var glyphs = std.ArrayList(RasterizedGlyph).init(allocator);
-    defer glyphs.deinit();
-
-    var x: i32 = 0;
-    var total_height: i32 = 0;
-    var total_width: i32 = 0;
-
-    for (text, 0..) |codepoint, i| {
-        const glyph = fcft.fcft_rasterize_char_utf32(font, codepoint, fcft.FCFT_SUBPIXEL_DEFAULT) orelse continue;
-
-        var kern: i32 = 0;
-        if (i > 0) {
-            var x_kern: c_long = 0;
-            if (fcft.fcft_kerning(font, text[i - 1], codepoint, &x_kern, null)) {
-                kern = @intCast(x_kern);
-            }
-        }
-
-        try glyphs.append(RasterizedGlyph{
-            .glyph = @ptrCast(@constCast(glyph)),
-            .x = x,
-            .kern = kern,
-        });
-
-        x += kern + glyph.*.advance.x;
-        total_width += kern + glyph.*.advance.x;
-        total_height = @max(total_height, @as(u16, @intCast(glyph.*.height)));
-    }
-
-    return RasterizedText{
-        .glyphs = try glyphs.toOwnedSlice(),
-        .total_width = total_width,
-        .total_height = total_height,
-        .ascent = @intCast(font.ascent),
-    };
-}
-
-pub const XRenderFont = struct {
+pub const RenderFont = struct {
     conn: *c.xcb_connection_t,
     font: *fcft.fcft_font,
+    // glyph: RasterizedGlyph,
     allocator: Allocator,
     dpi: f64,
 
@@ -170,7 +42,7 @@ pub const XRenderFont = struct {
             return XcbftError.XcbConnectionError;
         }
 
-        if (!fcft.fcft_init(fcft.FCFT_LOG_COLORIZE_AUTO, false, fcft.FCFT_LOG_CLASS_ERROR)) {
+        if (!fcft.fcft_init(fcft.FCFT_LOG_COLORIZE_ALWAYS, false, fcft.FCFT_LOG_CLASS_ERROR)) {
             std.log.err("cannot create fcft", .{});
             return XcbftError.FcftInitFailed;
         }
@@ -204,36 +76,113 @@ pub const XRenderFont = struct {
     pub fn deinit(self: *Self) void {
         fcft.fcft_destroy(self.font);
     }
+
+    pub inline fn draw_char(
+        self: *Self,
+        buf: *Buf.Buf,
+        char: u32,
+        x: i16,
+        y: i16,
+        color: u32,
+    ) !i16 {
+        const g = fcft.fcft_rasterize_char_utf32(self.font, char, fcft.FCFT_SUBPIXEL_DEFAULT) orelse {
+            return 0;
+        };
+
+        const format = c.pixman_image_get_format(@ptrCast(g.*.pix));
+
+        if (format == c.PIXMAN_a8r8g8b8) {
+            c.pixman_image_composite32(
+                c.PIXMAN_OP_OVER,
+                @ptrCast(g.*.pix),
+                null,
+                buf.pixman_image,
+                0,
+                0,
+                0,
+                0,
+                try std.math.add(i16, x, @intCast(g.*.x)),
+                try std.math.add(i16, @intCast(self.font.ascent), y) - @as(i16, @intCast(g.*.y)),
+                @intCast(g.*.width),
+                @intCast(g.*.height),
+            );
+        } else {
+            const color_img = try cache_pixman.pixmanImageCreateSolidFillCached(color);
+            c.pixman_image_composite32(
+                c.PIXMAN_OP_OVER,
+                color_img,
+                @ptrCast(g.*.pix),
+                buf.pixman_image,
+                0,
+                0,
+                0,
+                0,
+                try std.math.add(i16, x, @intCast(g.*.x)),
+                try std.math.add(i16, @intCast(self.font.ascent), y) - @as(i16, @intCast(g.*.y)),
+                @intCast(g.*.width),
+                @intCast(g.*.height),
+            );
+        }
+        return @intCast(g.*.advance.x);
+    }
+
     pub fn drawText(
         self: *Self,
         buf: *Buf.Buf,
         text: []const u32,
         x: i16,
         y: i16,
-        color: *c.pixman_color_t,
+        color: u32,
     ) !void {
-        const color_img = c.pixman_image_create_solid_fill(
-            color,
-        );
-        defer _ = c.pixman_image_unref(color_img);
-        if (color_img == null) {
-            std.log.err("Failed to create fg", .{});
-            return error.FgPixmanFailed;
+        var width: i32 = 0;
+        var prev_char: ?u32 = null;
+
+        for (text) |cp| {
+            var kern: i32 = 0;
+            if (prev_char) |prev| {
+                var x_kern: c_long = 0;
+                if (fcft.fcft_kerning(self.font, prev, cp, &x_kern, null)) {
+                    kern = @intCast(x_kern);
+                }
+            }
+
+            const advance = try self.draw_char(buf, cp, @intCast(@as(i32, @intCast(x)) + width + kern), y, color);
+            width += kern + advance;
+            prev_char = cp;
         }
 
-        // Rasterize text
-        var rasterized = try rasterizeText(self.font, text, self.allocator);
-        defer rasterized.deinit(self.allocator);
-
-        // Render to buffer
-        rasterized.renderToBuf(buf, x, y, color_img);
-
-        // Draw to screen
         try buf.draw();
     }
+    // pub fn drawText(
+    //     self: *Self,
+    //     buf: *Buf.Buf,
+    //     text: []const u32,
+    //     x: i16,
+    //     y: i16,
+    //     color: *c.pixman_color_t,
+    // ) !void {
+    //     const color_img = c.pixman_image_create_solid_fill(
+    //         color,
+    //     );
+    //     defer _ = c.pixman_image_unref(color_img);
+    //     if (color_img == null) {
+    //         std.log.err("Failed to create fg", .{});
+    //         return error.FgPixmanFailed;
+    //     }
+    //
+    //     // Rasterize text
+    //     var rasterized = try rasterizeText(self.font, text, self.allocator);
+    //     defer rasterized.deinit(self.allocator);
+    //
+    //     // Render to buffer
+    //     rasterized.renderToBuf(buf, x, y, color_img);
+    //
+    //     // Draw to screen
+    //     try buf.draw();
+    // }
 };
 
-pub inline fn xcb_color_to_uint32(rgb: c.xcb_render_color_t) u32 {
+pub inline fn color_to_uint32(comptime T: type, rgb: T) u32 {
     const r: u8 = @intCast(rgb.red >> 8);
     const g: u8 = @intCast(rgb.green >> 8);
     const b: u8 = @intCast(rgb.blue >> 8);

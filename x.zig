@@ -334,7 +334,7 @@ const TermWindow = struct {
 };
 
 const Font = struct {
-    face: font.XRenderFont,
+    face: font.RenderFont,
     size: rect = rect.initSize(0, 0),
     ascent: u32,
 };
@@ -2116,7 +2116,7 @@ pub const XlibTerminal = struct {
         errdefer xkb_state.unref();
 
         const font_query = c.font;
-        var xrender_font = try font.XRenderFont.init(connection, allocator, font_query[0..]);
+        var xrender_font = try font.RenderFont.init(connection, allocator, font_query[0..]);
         errdefer xrender_font.deinit();
         std.log.info("Font initialized: query={s}, dpi={d}", .{ font_query[0..], @as(u16, @intFromFloat(xrender_font.dpi)) });
 
@@ -2646,21 +2646,7 @@ pub const XlibTerminal = struct {
         const py_base = std.math.add(u16, borderpx, y_scaled) catch return error.Overflow;
         const py = std.math.add(u16, py_base, @as(u16, @intCast(ascent))) catch return error.Overflow;
 
-        // // Clear entire region with default background
-        // // const total_width = std.math.mul(u16, char_width, @as(u16, @intCast(len))) catch return error.Overflow;
-        // var fg = self.dc.col[c.defaultfg].color;
-        // const default_bg_pixel = font.xcb_color_to_uint32(fg.cval().*) | 0xff000000;
         const mask = c.XCB_GC_FOREGROUND | c.XCB_GC_GRAPHICS_EXPOSURES;
-        // const values = [_]u32{ default_bg_pixel, 0 };
-        // _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values);
-
-        // const clear_rect = c.xcb_rectangle_t{
-        //     .x = @intCast(px),
-        //     .y = @intCast(py_base),
-        //     .width = @intCast(total_width),
-        //     .height = @intCast(char_height),
-        // };
-        // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect);
 
         var start: usize = 0;
         var text: [c.MAX_COLS]u32 = undefined;
@@ -2686,29 +2672,22 @@ pub const XlibTerminal = struct {
 
                 if (text_len > 0) {
                     // Handle colors with reverse mode
-                    var fg_color = self.dc.col[current_glyph.fg_index].color;
-                    var bg_color = self.dc.col[current_glyph.bg_index].color;
+                    var fg_pixel = self.dc.col[current_glyph.fg_index].pixel;
+                    var bg_pixel = self.dc.col[current_glyph.bg_index].pixel;
                     if (current_glyph.mode.isSet(.ATTR_REVERSE)) {
-                        std.mem.swap(@TypeOf(fg_color), &fg_color, &bg_color);
+                        std.mem.swap(@TypeOf(fg_pixel), &fg_pixel, &bg_pixel);
                     }
 
                     // Set background color and fill rectangle
-                    const bg_pixel = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
+                    // const bg_pixel = font.color_to_uint32(
+                    //     c.xcb_render_color_t,
+                    //     bg_color.cval().*,
+                    // ) | 0xff000000;
                     const values_bg = [_]u32{ bg_pixel, 0 };
                     _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_bg);
 
                     const x_offset = std.math.mul(u16, @as(u16, @intCast(start)), char_width) catch return error.Overflow;
                     const rect_x = std.math.add(u16, px, x_offset) catch return error.Overflow;
-                    // const rect_width = std.math.mul(u16, char_width, @as(u16, @intCast(text_len))) catch return error.Overflow;
-                    // const rect_y = py_base; // Already offset by ascent in py
-
-                    // const clear_rect_group = c.xcb_rectangle_t{
-                    //     .x = @intCast(rect_x),
-                    //     .y = @intCast(rect_y),
-                    //     .width = @intCast(rect_width),
-                    //     .height = @intCast(char_height),
-                    // };
-                    // _ = c.xcb_poly_fill_rectangle(self.connection, self.pixmap, self.dc.gc, 1, &clear_rect_group);
 
                     // Render text with foreground color
                     _ = try self.dc.font.face.drawText(
@@ -2716,7 +2695,7 @@ pub const XlibTerminal = struct {
                         text[0..text_len],
                         @intCast(rect_x),
                         @intCast(py),
-                        fg_color.cval_pixman(),
+                        fg_pixel,
                     );
                 }
 
@@ -2735,13 +2714,12 @@ pub const XlibTerminal = struct {
             }
 
             if (text_len > 0) {
-                var fg_color = self.dc.col[current_glyph.fg_index].color;
-                var bg_color = self.dc.col[current_glyph.bg_index].color;
+                var fg_pixel = self.dc.col[current_glyph.fg_index].pixel;
+                var bg_pixel = self.dc.col[current_glyph.bg_index].pixel;
                 if (current_glyph.mode.isSet(.ATTR_REVERSE)) {
-                    std.mem.swap(@TypeOf(fg_color), &fg_color, &bg_color);
+                    std.mem.swap(@TypeOf(fg_pixel), &fg_pixel, &bg_pixel);
                 }
 
-                const bg_pixel = font.xcb_color_to_uint32(bg_color.cval().*) | 0xff000000;
                 const values_bg = [_]u32{ bg_pixel, 0 };
                 _ = c.xcb_change_gc(self.connection, self.dc.gc, mask, &values_bg);
 
@@ -2762,7 +2740,7 @@ pub const XlibTerminal = struct {
                     text[0..text_len],
                     @intCast(rect_x),
                     @intCast(py),
-                    fg_color.cval_pixman(),
+                    fg_pixel,
                 );
             }
         }

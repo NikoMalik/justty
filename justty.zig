@@ -6,7 +6,6 @@ const log = std.log;
 const xlib = @import("x.zig");
 const util = @import("util.zig");
 const print = std.debug.print;
-const xcb_font = @import("xcb_font.zig");
 const signal = @import("signal.zig");
 const build_options = @import("build_options");
 test {
