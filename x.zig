@@ -10,6 +10,7 @@ const data_structs = @import("datastructs.zig");
 const assert = std.debug.assert;
 const unicode = std.unicode;
 const Keysym = @import("keysym.zig");
+const escapes = @import("escapes.zig");
 // const font = @import("xcb_font.zig");
 const font = @import("fnt.zig");
 pub const vtiden: []const u8 = "\x1B[?6c"; // VT102 identification string
@@ -365,7 +366,7 @@ pub const Glyph = struct {
 
 const DirtySet = std.bit_set.ArrayBitSet(u16, c.MAX_ROWS);
 
-const Term = struct {
+pub const Term = struct {
     mode: TermMode, // Terminal modes
     /// Allocator
     allocator: Allocator,
@@ -373,8 +374,7 @@ const Term = struct {
     dirty: DirtySet, //Bitmask to keep track of “dirty” rows that need to be redrawn.
     line: [c.MAX_ROWS][c.MAX_COLS]Glyph, // Array of strings with fixed size MAX_ROWS
     alt: [c.MAX_ROWS][c.MAX_COLS]Glyph, // alt array(for example vim,htop) of strings with fixes size MAX_ROWS
-    csi_escape: CSIEscape,
-    esc_mode: EscMode, // status of esc
+    parser: escapes.Parser,
     //For an 80x24 character terminal with a Glyph size of 16 bytes, one screen takes ~30 KB.
     //Two screens - ~60 KB. can we use union for 60kb? mb not
     // cols,rows
@@ -406,15 +406,7 @@ const Term = struct {
                 .state = CursorMode.initEmpty(),
             },
             .tabs = undefined,
-            .csi_escape = CSIEscape{
-                .buf = undefined,
-                .esc_len = 0,
-                .priv = 0,
-                .narg = 0,
-                .params = [_]u32{0} ** esc_arg_size,
-                .mode = [_]u8{ 0, 0 },
-            },
-            .esc_mode = EscMode.initEmpty(),
+            .parser = escapes.Parser.init(allocator),
             .ocx = 0,
             .ocy = 0,
             .top = 0,
@@ -436,8 +428,30 @@ const Term = struct {
         return term;
     }
 
+    pub fn reset(self: *Term) void {
+        self.parser.reset();
+        self.mode = TermMode.initEmpty();
+        self.mode.set(.MODE_WRAP);
+        self.cursor = TCursor{
+            .attr = Glyph{ .u = ' ', .fg_index = c.defaultfg, .bg_index = c.defaultbg, .mode = GLyphMode.initEmpty() },
+            .state = CursorMode.initEmpty(),
+        };
+        self.ocx = 0;
+        self.ocy = 0;
+        self.top = 0;
+        self.bot = self.window.tty_grid.getRows().? - 1;
+        self.lastc = 0;
+        self.charset = 0;
+        self.icharset = 0;
+        self.trantbl = [_]u8{0} ** 4;
+        self.cursor_visible = true;
+        @memset(&self.line, [_]Glyph{Glyph.initEmpty()} ** c.MAX_COLS);
+        @memset(&self.alt, [_]Glyph{Glyph.initEmpty()} ** c.MAX_COLS);
+        self.fulldirt();
+    }
+
     // NOTE: Inserts n empty characters at the current cursor position, shifting existing characters to the right.
-    inline fn csi_ich(self: *Term, params: []u32) !void { // Insert Characters
+    pub inline fn csi_ich(self: *Term, params: []u32) !void { // Insert Characters
         const n = DEFAULT(u32, params[0], 1);
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const cursor_x = self.cursor.pos.getX().?; // i16
@@ -480,13 +494,13 @@ const Term = struct {
     }
 
     // NOTE: Deletes n characters starting from the current cursor position, shifting the remaining characters to the left.
-    fn csi_dch(self: *Term, params: []u32) void { // Delete Characters
+    pub inline fn csi_dch(self: *Term, params: []u32) void { // Delete Characters
         const n = DEFAULT(u32, params[0], 1);
         self.tdeletechar(n);
     }
 
     // NOTE: Moves the cursor up n lines.
-    inline fn csi_cuu(self: *Term, params: []u32) !void {
+    pub inline fn csi_cuu(self: *Term, params: []u32) !void {
         const n = DEFAULT(u32, params[0], 1);
         const old_y = self.cursor.pos.getY().?;
         const new_y = if (old_y > n)
@@ -497,7 +511,7 @@ const Term = struct {
         self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Moves the cursor to the left by n positions.
-    inline fn csi_cub(self: *Term, params: []u32) !void {
+    pub inline fn csi_cub(self: *Term, params: []u32) !void {
         const n = DEFAULT(u32, params[0], 1);
         const old_x = self.cursor.pos.getX().?;
         const new_x = if (old_x > n)
@@ -508,7 +522,7 @@ const Term = struct {
         self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getY().?));
     }
 
-    inline fn moveCursor(self: *Term, dx: i16, dy: i16) void {
+    pub inline fn moveCursor(self: *Term, dx: i16, dy: i16) void {
         var pos_vec: @Vector(2, i16) = .{ self.cursor.pos.getX().?, self.cursor.pos.getY().? };
         const delta_vec: @Vector(2, i16) = .{ dx, dy };
         pos_vec += delta_vec;
@@ -523,7 +537,7 @@ const Term = struct {
     }
 
     // NOTE: Moves the cursor down n lines.
-    inline fn csi_cud(self: *Term, params: []u32) void {
+    pub inline fn csi_cud(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
         const old_y = self.cursor.pos.getY().?;
         const new_y = @min(
@@ -534,7 +548,7 @@ const Term = struct {
         self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Processes Media Control commands. (Media Control)
-    inline fn csi_mc(self: *Term, params: []u32, xterm: *XlibTerminal) void {
+    pub inline fn csi_mc(self: *Term, params: []u32, xterm: *XlibTerminal) void {
         switch (params[0]) {
             0 => xterm.tdump(),
             1 => xterm.tdumpline(self.cursor.pos.getY().?),
@@ -545,13 +559,13 @@ const Term = struct {
         }
     }
     // NOTE: ask for questions about DEVICE ATTRIBUTES
-    inline fn csi_da(_: *Term, params: []u32, xterm: *XlibTerminal) void {
+    pub inline fn csi_da(_: *Term, params: []u32, xterm: *XlibTerminal) void {
         if (params[0] == 0) {
             xterm.ttywrite(vtiden, vtiden.len, 0);
         }
     }
     // NOTE:moves the cursor right n lines
-    inline fn csi_cuf(self: *Term, params: []u32) void { // Cursor Forward
+    pub inline fn csi_cuf(self: *Term, params: []u32) void { // Cursor Forward
         const n = DEFAULT(u32, params[0], 1);
         const new_x = @min(self.cursor.pos.getX().? + @as(i16, @intCast(n)), @as(i16, @intCast(self.window.tty_grid.getCols().? - 1)));
         self.cursor.pos.addX(new_x);
@@ -559,7 +573,7 @@ const Term = struct {
     }
 
     // NOTE: Moves the cursor to the beginning of the next line (or n lines below).
-    inline fn csi_cnl(self: *Term, params: []u32) void {
+    pub inline fn csi_cnl(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
         const old_y = self.cursor.pos.getY().?;
         self.cursor.pos.addX(0);
@@ -568,7 +582,7 @@ const Term = struct {
         self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Moves the cursor to the beginning of the previous line (or n lines above).
-    inline fn csi_cpl(self: *Term, params: []u32) void {
+    pub inline fn csi_cpl(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
         const old_y = self.cursor.pos.getY().?;
         self.cursor.pos.addX(0);
@@ -577,7 +591,7 @@ const Term = struct {
         self.set_dirt(@intCast(new_y), @intCast(old_y));
     }
     // NOTE: Controls the tabulation setting (Tabulation Clear).
-    inline fn csi_tbc(self: *Term, params: []u32) void {
+    pub inline fn csi_tbc(self: *Term, params: []u32) void {
         switch (params[0]) {
             0 => self.tabs[@intCast(self.cursor.pos.getX().?)] = 0,
             3 => @memset(&self.tabs, 0),
@@ -585,7 +599,7 @@ const Term = struct {
         }
     }
     // NOTE: Moves the cursor to the absolute position on the current line.
-    inline fn csi_cha(self: *Term, params: []u32) void {
+    pub inline fn csi_cha(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
         const new_x = @min(@as(i16, @intCast(n - 1)), @as(i16, @intCast(self.window.tty_grid.getCols().? - 1)));
         self.cursor.pos.addX(new_x);
@@ -593,7 +607,7 @@ const Term = struct {
     }
 
     // NOTE: Moves the cursor to the specified position (row, column).
-    inline fn csi_cup(self: *Term, params: []u32) void { // Cursor Position
+    pub inline fn csi_cup(self: *Term, params: []u32) void { // Cursor Position
         const row = DEFAULT(u32, params[0], 1);
         const col = DEFAULT(u32, params[1], 1);
         const new_y = @min(@as(i16, @intCast(row - 1)), @as(i16, @intCast(self.window.tty_grid.getRows().? - 1)));
@@ -603,13 +617,13 @@ const Term = struct {
         self.set_dirt(@intCast(old_y), @intCast(new_y));
     }
     // NOTE: Moves the cursor n tabs to the right.
-    inline fn csi_cht(self: *Term, params: []u32) void { // Character Tabulation
+    pub inline fn csi_cht(self: *Term, params: []u32) void { // Character Tabulation
         const n = DEFAULT(u32, params[0], 1);
         self.tputtab(@intCast(n));
     }
 
     // NOTE: Clears the screen or part of it depending on the parameter n.
-    inline fn csi_ed(self: *Term, params: []u32) void { // Erase Display
+    pub inline fn csi_ed(self: *Term, params: []u32) void { // Erase Display
         const n = params[0];
         const cols = self.window.tty_grid.getCols().? - 1;
         const rows = self.window.tty_grid.getRows().? - 1;
@@ -634,7 +648,7 @@ const Term = struct {
     }
 
     // NOTE: Clears the string or part of it depending on the parameter n.
-    inline fn csi_el(self: *Term, params: []u32) void {
+    pub inline fn csi_el(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 0);
         const y = self.cursor.pos.getY().?;
         const cols = self.window.tty_grid.getCols().? - 1;
@@ -647,33 +661,33 @@ const Term = struct {
     }
 
     // NOTE: Scrolls up the screen by n lines.
-    inline fn csi_su(self: *Term, params: []u32) void { // Pan Down / Scroll Up
+    pub inline fn csi_su(self: *Term, params: []u32) void { // Pan Down / Scroll Up
         const n = DEFAULT(u32, params[0], 1);
         self.tscrollup(self.top, n);
     }
 
     // NOTE: Scrolls the screen down n lines.
-    inline fn csi_sd(self: *Term, params: []u32) void { // Scroll Down
+    pub inline fn csi_sd(self: *Term, params: []u32) void { // Scroll Down
         const n = DEFAULT(u32, params[0], 1);
         self.tscrolldown(self.top, n);
     }
     // NOTE: Inserts n empty lines at the current cursor position.
-    inline fn csi_il(self: *Term, params: []u32) void {
+    pub inline fn csi_il(self: *Term, params: []u32) void {
         const n = DEFAULT(u32, params[0], 1);
         self.tinsertblankline(n);
     }
     // NOTE: Resets the terminal modes.
-    inline fn csi_rm(self: *Term, params: []u32, narg: usize, priv: u8, winmode: *WinMode) void { // Reset Mode
+    pub inline fn csi_rm(self: *Term, params: []u32, narg: usize, priv: u8, winmode: *WinMode) void { // Reset Mode
         self.tsetmode(priv, 0, params, narg, winmode);
     }
 
     // NOTE: Deletes n lines starting from the current cursor position.
-    inline fn csi_dl(self: *Term, params: []u32) void { // Delete Line
+    pub inline fn csi_dl(self: *Term, params: []u32) void { // Delete Line
         const n = DEFAULT(u32, params[0], 1);
         self.tdeleteline(n);
     }
     // NOTE: Clears n characters starting from the current cursor position.
-    inline fn csi_ech(self: *Term, params: []u32) void { // Erase Characteres
+    pub inline fn csi_ech(self: *Term, params: []u32) void { // Erase Characteres
         const n = DEFAULT(u32, params[0], 1);
         const end_x = @min(
             self.cursor.pos.getX().? + @as(i16, @intCast(n)) - 1,
@@ -687,12 +701,12 @@ const Term = struct {
         );
     }
     // NOTE: Moves the cursor n tabs to the left.
-    inline fn csi_cbt(self: *Term, params: []u32) void { // Character Backwards Tabulation
+    pub inline fn csi_cbt(self: *Term, params: []u32) void { // Character Backwards Tabulation
         const n = DEFAULT(i16, @intCast(params[0]), 1);
         self.tputtab(-n);
     }
     // NOTE: Moves the cursor to the specified line (absolute position).
-    inline fn csi_vpa(self: *Term, params: []u32) void {
+    pub inline fn csi_vpa(self: *Term, params: []u32) void {
         const n = DEFAULT(i16, @intCast(params[0]), 1);
         const new_y = @min(@as(i16, @intCast(n - 1)), @as(i16, @intCast(self.window.tty_grid.getRows().? - 1)));
         const old_y = self.cursor.pos.getY().?;
@@ -701,17 +715,17 @@ const Term = struct {
     }
 
     // NOTE: Set terminal nodes
-    inline fn csi_sm(self: *Term, params: []u32, narg: usize, priv: u8, winmode: *WinMode) void {
+    pub inline fn csi_sm(self: *Term, params: []u32, narg: usize, priv: u8, winmode: *WinMode) void {
         self.tsetmode(priv, 1, params, narg, winmode);
     }
 
     // NOTE: Sets character attributes (color, style, etc.).
-    fn csi_sgr(self: *Term, params: []u32, narg: usize) void { // Select Graphic Rendition
+    pub fn csi_sgr(self: *Term, params: []u32, narg: usize) void { // Select Graphic Rendition
         self.handle_sgr(params[0..narg]);
         self.set_dirt(@intCast(self.cursor.pos.getY().?), @intCast(self.cursor.pos.getX().?));
     }
     // NOTE: Responds to cursor or device status requests (Device Status Report).
-    inline fn csi_dsr(self: *Term, params: []u32, xterm: *XlibTerminal) void {
+    pub inline fn csi_dsr(self: *Term, params: []u32, xterm: *XlibTerminal) void {
         var buf: [40]u8 = undefined;
         switch (params[0]) {
             5 => xterm.ttywrite("\x1B[0n", 4, 0),
@@ -724,7 +738,7 @@ const Term = struct {
     }
 
     // NOTE: Sets the upper and lower scroll limits.
-    fn csi_decstbm(self: *Term, params: []u32) void {
+    pub fn csi_decstbm(self: *Term, params: []u32) void {
         const top = DEFAULT(u32, params[0], 1);
         const bot = DEFAULT(u32, params[1], self.window.tty_grid.getRows().?);
         self.tsetscroll(@as(u16, @intCast(top - 1)), @as(u16, @intCast(bot - 1)));
@@ -785,7 +799,7 @@ const Term = struct {
     }
 
     // NOTE: Moves the cursor to the next or previous tab position.
-    inline fn tputtab(self: *Term, n: i16) void {
+    pub inline fn tputtab(self: *Term, n: i16) void {
         const cols = self.window.tty_grid.getCols().?;
         var x = self.cursor.pos.getX().?;
         if (n > 0) {
@@ -806,7 +820,7 @@ const Term = struct {
     }
 
     // NOTE: Scrolls up the screen by n lines in the area from top to bottom.
-    inline fn tscrollup(self: *Term, top: u16, n: u32) void {
+    pub inline fn tscrollup(self: *Term, top: u16, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const rows = self.window.tty_grid.getRows().?;
         const shift = @min(n, @as(u32, rows - top));
@@ -826,7 +840,7 @@ const Term = struct {
     }
 
     // NOTE: Scrolls the screen down n lines in the area from top to bottom.
-    inline fn tscrolldown(self: *Term, top: u16, n: u32) void {
+    pub inline fn tscrolldown(self: *Term, top: u16, n: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
         const rows = self.window.tty_grid.getRows().?;
         const shift = @min(n, @as(u32, rows - top));
@@ -908,7 +922,8 @@ const Term = struct {
         );
 
         for (rows - shift..rows) |y| {
-            @memset(&screen[y], Glyph.initEmpty());
+            util.set(Glyph, &screen[y], Glyph.initEmpty());
+
             self.set_dirt(@intCast(y), @intCast(y));
         }
     }
@@ -945,18 +960,18 @@ const Term = struct {
         }
     }
     // NOTE: Saves or loads the cursor position.
-    fn tcursor(self: *Term, mode: enum { CURSOR_SAVE, CURSOR_LOAD }) void {
+    pub fn tcursor(self: *Term, mode: enum { CURSOR_SAVE, CURSOR_LOAD }) void {
         if (mode == .CURSOR_SAVE) {
-            self.ocx = self.cursor.pos.getX().?;
-            self.ocy = self.cursor.pos.getY().?;
+            self.ocx = @intCast(self.cursor.pos.getX().?);
+            self.ocy = @intCast(self.cursor.pos.getY().?);
         } else {
             const old_y = self.cursor.pos.getY().?;
-            self.cursor.pos.addPosition(self.ocx, self.ocy);
-            self.set_dirt(old_y, self.ocy);
+            self.cursor.pos.addPosition(@intCast(self.ocx), @intCast(self.ocy));
+            self.set_dirt(@intCast(old_y), @intCast(self.ocy));
         }
     }
     // NOTE: Outputs the character at the current cursor position and updates its position.
-    inline fn tputc(self: *Term, u: u32) void {
+    pub inline fn tputc(self: *Term, u: u32) void {
         const screen = if (self.mode.isSet(.MODE_ALTSCREEN)) &self.alt else &self.line;
 
         const x = self.cursor.pos.getX().?;
@@ -1070,7 +1085,7 @@ const Term = struct {
     }
     // NOTE: Marks lines from top to bot as “dirty” for redrawing.
     //for example from 5 to 10 lines are dirty
-    inline fn set_dirt(self: *Term, top: u16, bot: u16) void {
+    pub inline fn set_dirt(self: *Term, top: u16, bot: u16) void {
         const rows = self.window.tty_grid.getRows().?;
         if (top > bot or bot >= rows or c.MAX_ROWS == 0) return;
         const start = top;
@@ -1079,7 +1094,7 @@ const Term = struct {
         self.dirty.setRangeValue(.{ .start = start, .end = end + one }, true);
     }
 
-    inline fn fulldirt(self: *Term) void {
+    pub inline fn fulldirt(self: *Term) void {
         self.set_dirt(0, self.window.tty_grid.getRows().? - 1);
     }
     // NOTE: Calculates the length of the string, ignoring end spaces.
@@ -1797,7 +1812,7 @@ pub const rect = struct {
         }
     }
 
-    inline fn addX(self: *rect, x: i16) void {
+    pub inline fn addX(self: *rect, x: i16) void {
         switch (self.data) {
             .full => |*f| {
                 f.x = x;
@@ -1814,7 +1829,7 @@ pub const rect = struct {
         }
     }
 
-    inline fn addY(self: *rect, y: i16) void {
+    pub inline fn addY(self: *rect, y: i16) void {
         switch (self.data) {
             .full => |*f| {
                 f.y = y;
@@ -2338,6 +2353,23 @@ pub const XlibTerminal = struct {
         };
     }
 
+    pub fn set_title(self: *XlibTerminal, title: []const u8) !void {
+        const atom_name = c.XCB_ATOM_WM_NAME;
+        const prop_mode = c.XCB_PROP_MODE_REPLACE;
+        _ = c.xcb_change_property(
+            self.connection,
+            prop_mode,
+            get_main_window(self.connection),
+            atom_name,
+            c.XCB_ATOM_STRING,
+            8,
+            @intCast(title.len),
+            title.ptr,
+        );
+        _ = c.xcb_flush(self.connection);
+        std.log.debug("Set window title: {s}", .{title});
+    }
+
     fn reset(self: *Self, xterm: *XlibTerminal) void {
         xterm.term.esc_mode = EscMode.initEmpty();
         self.esc_len = 0;
@@ -2346,7 +2378,7 @@ pub const XlibTerminal = struct {
         self.mode = [_]u8{ 0, 0 };
     }
 
-    fn ttywrite(self: *Self, buf: []const u8, len: usize, flush: u8) void {
+    pub fn ttywrite(self: *Self, buf: []const u8, len: usize, flush: u8) void {
         const write_len = @min(len, buf.len);
         _ = self.pty.write(buf[0..write_len]) catch |err| {
             std.log.err("ttywrite error: {}", .{err});
@@ -2443,61 +2475,47 @@ pub const XlibTerminal = struct {
 
         // std.log.debug("tdumpsel: Dumped selection of length {}", .{selected_text.len});
     }
-    fn csihandle(self: *Self, csi: *CSIEscape) !void {
-        const params = csi.params[0..csi.narg];
-        switch (csi.mode[0]) {
-            '@' => try self.term.csi_ich(params), // insert characters
-            'A' => try self.term.csi_cuu(params), // cursor up
-            'B', 'e' => self.term.csi_cud(params), //
-            'i' => self.term.csi_mc(params, self),
-            'c' => self.term.csi_da(params, self),
-            'b' => self.term.csi_rep(params),
-            'C', 'a' => self.term.csi_cuf(params),
-            'D' => try self.term.csi_cub(params),
-            'E' => self.term.csi_cnl(params),
-            'F' => self.term.csi_cpl(params),
-            'g' => self.term.csi_tbc(params),
-            'G', '`' => self.term.csi_cha(params),
-            'H', 'f' => self.term.csi_cup(params),
-            'I' => self.term.csi_cht(params),
-            'J' => self.term.csi_ed(params),
-            'K' => self.term.csi_el(params),
-            'S' => if (csi.priv == 0) self.term.csi_su(params) else std.log.warn("Unknown private SU sequence", .{}),
-            'T' => self.term.csi_sd(params),
-            'L' => self.term.csi_il(params),
-            'l' => self.term.csi_rm(params, csi.narg, csi.priv, &self.term.window.mode),
-            'M' => self.term.csi_dl(params),
-            'X' => self.term.csi_ech(params),
-            'P' => self.term.csi_dch(params),
-            'Z' => self.term.csi_cbt(params),
-            'd' => self.term.csi_vpa(params),
-            'h' => self.term.csi_sm(params, csi.narg, csi.priv, &self.term.window.mode),
-            'm' => {
-                if (csi.narg == 0) {
+    fn csihandle(self: *XlibTerminal, parser: *escapes.Parser) !void {
+        const params = parser.params[0..parser.narg];
+        switch (@as(escapes.CSI_ENUM, @enumFromInt(parser.mode[0]))) {
+            .InsertCharacters => try self.term.csi_ich(params),
+            .CursorUp => try self.term.csi_cuu(params),
+            .CursorDown => self.term.csi_cud(params),
+            .MediaControl => self.term.csi_mc(params, self),
+            .DeviceAttributes => self.term.csi_da(params, self),
+            .CursorForward => self.term.csi_cuf(params),
+            .CursorBack => try self.term.csi_cub(params),
+            .CursorNextLine => self.term.csi_cnl(params),
+            .CursorPreviousLine => self.term.csi_cpl(params),
+            .CharacterTabulation => self.term.csi_cht(params),
+            .CharacterBackwardsTabulation => self.term.csi_cbt(params),
+            .CursorHorizontalAbsolute => self.term.csi_cha(params),
+            .CursorPosition => self.term.csi_cup(params),
+            .EraseInDisplay => self.term.csi_ed(params),
+            .EraseInLine => self.term.csi_el(params),
+            .ScrollUp => if (parser.priv == 0) self.term.csi_su(params) else std.log.warn("Unknown private SU sequence", .{}),
+            .ScrollDown => self.term.csi_sd(params),
+            .InsertLine => self.term.csi_il(params),
+            .DeleteLine => self.term.csi_dl(params),
+            .EraseCharacters => self.term.csi_ech(params),
+            .DeleteCharacters => self.term.csi_dch(params),
+            .VerticalPositionAbsolute => self.term.csi_vpa(params),
+            .SelectGraphicRendition => {
+                if (parser.narg == 0) {
                     self.term.handle_sgr(params);
                 } else {
-                    self.term.csi_sgr(params, csi.narg);
+                    self.term.csi_sgr(params, parser.narg);
                 }
             },
-            'n' => self.term.csi_dsr(params, self),
-            'r' => if (csi.priv == 0) self.term.csi_decstbm(params) else std.log.warn("Unknown private DECSTBM sequence", .{}),
-            // 's' => self.term.csi_decsc(),
-            // 'u' => if (csi.priv == 0) self.term.csi_decrc() else std.log.warn("Unknown private DECRC sequence", .{}),
-            // ' ' => {
-            //     if (csi.mode[1] == 'q') {
-            //         if (!self.term.csi_decscusr(params, self)) {
-            //             std.log.warn("Unknown DECSCUSR parameter: {}", .{params[0]});
-            //         }
-            //     } else {
-            //         std.log.warn("Unknown CSI space sequence: mode[1]={c}", .{csi.mode[1]});
-            //     }
-            // },
+            .DeviceStatusReport => self.term.csi_dsr(params, self),
+            .DECSTBM => if (parser.priv == 0) self.term.csi_decstbm(params) else std.log.warn("Unknown private DECSTBM sequence", .{}),
+            .SaveCursorPosition => self.term.tcursor(.CURSOR_SAVE),
+            .RestoreCursorPosition => self.term.tcursor(.CURSOR_LOAD),
             else => {
-                std.log.err("Unknown CSI sequence: mode[0]={c}", .{csi.mode[0]});
+                std.log.err("Unknown CSI sequence: mode[0]={c}", .{parser.mode[0]});
             },
         }
     }
-
     inline fn scrollUp(self: *Self, rows: u16) void {
         const shift = @min(rows, self.term.window.tty_grid.getRows().? - 1);
         if (shift == 0) return;
@@ -2548,76 +2566,85 @@ pub const XlibTerminal = struct {
     }
 
     pub fn process_input(self: *XlibTerminal, data: []const u8) !void {
-        var pos: usize = 0;
-        const codepoint_count = util.countUtf8CodePoints(data);
-        const utf32_buffer = try self.allocator.alloc(u32, codepoint_count);
-        defer self.allocator.free(utf32_buffer);
-
-        while (pos < data.len) {
-            const valid_len = util.utf8_validate_pos(data[pos..]) orelse {
-                std.log.warn("Invalid UTF-8 byte at pos {}", .{pos});
-                pos += 1;
-                continue;
+        if (self.term.mode.isSet(.MODE_ECHO)) {
+            _ = self.pty.write(data) catch |err| {
+                std.log.err("Failed to echo to PTY: {}", .{err});
             };
-            const chunk = data[pos .. pos + valid_len];
-            pos += valid_len;
-
-            const codepoints = util.decode_utf8_to_utf32(chunk, utf32_buffer) catch |err| {
-                std.log.err("UTF-8 decode error: {}", .{err});
-                continue;
-            };
-
-            if (self.term.mode.isSet(.MODE_ECHO)) {
-                _ = self.pty.write(chunk) catch |err| {
-                    std.log.err("Failed to echo to PTY: {}", .{err});
-                };
-            }
-
-            for (codepoints) |codepoint| {
-                if (self.term.esc_mode.isSet(.ESC_START)) {
-                    var utf8_buf: [4]u8 = undefined;
-                    const len = util.utf8Encode(u32, codepoint, &utf8_buf);
-                    try self.term.csi_escape.parse_esc(self, utf8_buf[0..len]);
-                    continue;
-                }
-
-                switch (codepoint) {
-                    0x1B => {
-                        self.term.esc_mode.set(.ESC_START);
-                        continue;
-                    },
-                    '\n' => {
-                        self.term.cursor.pos.addX(0);
-                        if (self.term.cursor.pos.getY().? < self.term.window.tty_grid.getRows().? - 1) {
-                            self.term.cursor.pos.data.position.y += 1;
-                        } else {
-                            self.scrollUp(1);
-                        }
-                        self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
-                    },
-                    '\r' => {
-                        self.term.cursor.pos.addX(0);
-                        self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
-                    },
-                    '\x08' => {
-                        if (self.term.cursor.pos.getX().? > 0) {
-                            self.term.cursor.pos.data.position.x -= 1;
-                            self.term.line[@intCast(self.term.cursor.pos.getY().?)][@intCast(self.term.cursor.pos.getX().?)] = Glyph.initEmpty();
-                            self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
-                        }
-                    },
-                    '\t' => self.term.tputtab(1),
-                    else => {
-                        if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
-                            self.term.tputc(codepoint);
-                        } else {
-                            std.log.debug("Skipping non-printable codepoint: {x}", .{codepoint});
-                        }
-                    },
-                }
-            }
         }
+        try self.term.parser.process_input(&self.term, self, data);
     }
+
+    // pub fn process_input(self: *XlibTerminal, data: []const u8) !void {
+    //     var pos: usize = 0;
+    //     const codepoint_count = util.countUtf8CodePoints(data);
+    //     const utf32_buffer = try self.allocator.alloc(u32, codepoint_count);
+    //     defer self.allocator.free(utf32_buffer);
+    //
+    //     while (pos < data.len) {
+    //         const valid_len = util.utf8_validate_pos(data[pos..]) orelse {
+    //             std.log.warn("Invalid UTF-8 byte at pos {}", .{pos});
+    //             pos += 1;
+    //             continue;
+    //         };
+    //         const chunk = data[pos .. pos + valid_len];
+    //         pos += valid_len;
+    //
+    //         const codepoints = util.decode_utf8_to_utf32(chunk, utf32_buffer) catch |err| {
+    //             std.log.err("UTF-8 decode error: {}", .{err});
+    //             continue;
+    //         };
+    //
+    //         if (self.term.mode.isSet(.MODE_ECHO)) {
+    //             _ = self.pty.write(chunk) catch |err| {
+    //                 std.log.err("Failed to echo to PTY: {}", .{err});
+    //             };
+    //         }
+    //
+    //         for (codepoints) |codepoint| {
+    //             if (self.term.esc_mode.isSet(.ESC_START)) {
+    //                 var utf8_buf: [4]u8 = undefined;
+    //                 const len = util.utf8Encode(u32, codepoint, &utf8_buf);
+    //                 try self.term.csi_escape.parse_esc(self, utf8_buf[0..len]);
+    //                 continue;
+    //             }
+    //
+    //             switch (codepoint) {
+    //                 0x1B => {
+    //                     self.term.esc_mode.set(.ESC_START);
+    //                     continue;
+    //                 },
+    //                 '\n' => {
+    //                     self.term.cursor.pos.addX(0);
+    //                     if (self.term.cursor.pos.getY().? < self.term.window.tty_grid.getRows().? - 1) {
+    //                         self.term.cursor.pos.data.position.y += 1;
+    //                     } else {
+    //                         self.scrollUp(1);
+    //                     }
+    //                     self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
+    //                 },
+    //                 '\r' => {
+    //                     self.term.cursor.pos.addX(0);
+    //                     self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
+    //                 },
+    //                 '\x08' => {
+    //                     if (self.term.cursor.pos.getX().? > 0) {
+    //                         self.term.cursor.pos.data.position.x -= 1;
+    //                         self.term.line[@intCast(self.term.cursor.pos.getY().?)][@intCast(self.term.cursor.pos.getX().?)] = Glyph.initEmpty();
+    //                         self.term.set_dirt(@intCast(self.term.cursor.pos.getY().?), @intCast(self.term.cursor.pos.getY().?));
+    //                     }
+    //                 },
+    //                 '\t' => self.term.tputtab(1),
+    //                 else => {
+    //                     if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
+    //                         self.term.tputc(codepoint);
+    //                     } else {
+    //                         std.log.debug("Skipping non-printable codepoint: {x}", .{codepoint});
+    //                     }
+    //                 },
+    //             }
+    //         }
+    //     }
+    // }
     pub fn drawline(self: *XlibTerminal, x1: u16, y1: u16, x2: u16) void {
         const row = self.term.line[y1][x1..x2];
         try self.xdrawglyphfontspecs(row, x1, y1, x2 - x1);
@@ -3114,7 +3141,6 @@ pub const XlibTerminal = struct {
 
         if (modifiers & c.XCB_MOD_MASK_SHIFT != 0 and modifiers & c.XCB_MOD_MASK_1 != 0) {
             const components: Keysym.State.Component = @enumFromInt(Keysym.State.Component.layout_effective);
-
             const current_group = Keysym.State.serializeLayout(seat, components);
             const next_group = (current_group + 1) % 2;
             _ = Keysym.State.updateMask(seat, 0, 0, 0, next_group, 0, 0);
@@ -3123,96 +3149,58 @@ pub const XlibTerminal = struct {
 
         switch (keysym) {
             .Return => {
-                //  '\n' in PTY
-                const char = '\n';
-                _ = posix.write(self.pty.master, &[_]u8{char}) catch |err| {
-                    std.log.err("Failed to write to PTY: {}", .{err});
-                };
-                self.term.cursor.pos.addX(0);
-                if (self.term.cursor.pos.getY().? < self.term.window.tty_grid.getRows().? - 1) {
-                    self.term.cursor.pos.data.position.y += 1;
-                } else {
-                    self.scrollUp(1);
+                const char = [_]u8{0x0A};
+                try self.term.parser.process_input(&self.term, self, &char);
+                if (!self.term.mode.isSet(.MODE_ECHO)) {
+                    _ = posix.write(self.pty.master, &char) catch |err| {
+                        std.log.err("Failed to write to PTY: {}", .{err});
+                    };
                 }
-                self.term.dirty.set(@intCast(self.term.cursor.pos.getY().?));
                 try self.redraw();
             },
             .BackSpace => {
-                if (self.term.cursor.pos.getX().? > 0) {
-                    self.term.cursor.pos.data.position.x -= 1;
-                    self.term.line[@intCast(self.term.cursor.pos.getY().?)][@intCast(self.term.cursor.pos.getX().?)] = Glyph.initEmpty();
-                    self.term.dirty.set(@intCast(self.term.cursor.pos.getY().?));
-                    try self.redraw();
+                //  BS
+                const char = [_]u8{0x08};
+                try self.term.parser.process_input(&self.term, self, &char);
+                if (!self.term.mode.isSet(.MODE_ECHO)) {
+                    _ = posix.write(self.pty.master, &char) catch |err| {
+                        std.log.err("Failed to write to PTY: {}", .{err});
+                    };
                 }
-                //  '\b' in PTY
-                const char = 0x08;
-                _ = posix.write(self.pty.master, &[_]u8{char}) catch |err| {
-                    std.log.err("Failed to write to PTY: {}", .{err});
-                };
+                try self.redraw();
             },
             .Left => {
-                //TODO:MAKE SUB IN RECT METHODS
-                if (self.term.cursor.pos.getX().? > 0) {
-                    self.term.cursor.pos.data.position.x -= 1;
-                    self.term.dirty.set(@intCast(self.term.cursor.pos.data.position.y));
-                    try self.redraw();
-                }
+                try self.term.csi_cub(@ptrCast(@constCast(&[_]u32{1})));
+                try self.redraw();
             },
             .Right => {
-                if (self.term.cursor.pos.getX().? < self.term.window.tty_grid.getCols().? - 1) {
-                    self.term.cursor.pos.data.position.x += 1;
-                    self.term.dirty.set(@intCast(self.term.cursor.pos.getY().?));
-                    try self.redraw();
-                }
+                self.term.csi_cuf(@ptrCast(@constCast(&[_]u32{1})));
+                try self.redraw();
             },
             .Escape => {
-                const char = 0x1B;
-                _ = posix.write(self.pty.master, &[_]u8{char}) catch |err| {
-                    std.log.err("Failed to write to PTY: {}", .{err});
-                };
-                self.term.esc_mode.set(.ESC_START);
+                const char = [_]u8{0x1B};
+                try self.term.parser.process_input(&self.term, self, &char);
+                if (!self.term.mode.isSet(.MODE_ECHO)) {
+                    _ = posix.write(self.pty.master, &char) catch |err| {
+                        std.log.err("Failed to write to PTY: {}", .{err});
+                    };
+                }
+                try self.redraw();
             },
             else => {
                 if (len > 0) {
-                    _ = posix.write(self.pty.master, utf8_str) catch |err| {
-                        std.log.err("Failed to write to PTY: {}", .{err});
-                    };
-
-                    var utf32_buffer: [1]u32 = undefined;
-                    const codepoints = util.decode_utf8_to_utf32(utf8_str, &utf32_buffer) catch |err| {
-                        std.log.err("UTF-8 decode error: {}", .{err});
-                        return;
-                    };
-
-                    for (codepoints) |codepoint| {
-                        if (unicode.utf8ValidCodepoint(@intCast(codepoint)) and codepoint >= 0x20) {
-                            const x = self.term.cursor.pos.getX().?;
-                            const y = self.term.cursor.pos.getY().?;
-                            if (x < self.term.window.tty_grid.getCols().? and y < self.term.window.tty_grid.getRows().?) {
-                                self.term.line[@intCast(y)][@intCast(x)] = Glyph{
-                                    .u = codepoint,
-                                    .fg_index = c.defaultfg,
-                                    .bg_index = c.defaultbg,
-                                    .mode = GLyphMode.initEmpty(),
-                                };
-                                self.term.cursor.pos.data.position.x += 1;
-                                if (self.term.cursor.pos.getX().? >= self.term.window.tty_grid.getCols().?) {
-                                    self.term.cursor.pos.addX(0);
-                                    self.term.cursor.pos.data.position.y += 1;
-                                    if (self.term.cursor.pos.getY().? >= self.term.window.tty_grid.getRows().?) {
-                                        self.term.cursor.pos.addY(@intCast(self.term.window.tty_grid.getRows().? - 1));
-                                        self.scrollUp(1);
-                                    }
-                                }
-                                self.term.dirty.set(@intCast(y));
-                            }
-                        }
+                    try self.term.parser.process_input(&self.term, self, utf8_str);
+                    if (!self.term.mode.isSet(.MODE_ECHO)) {
+                        _ = posix.write(self.pty.master, utf8_str) catch |err| {
+                            std.log.err("Failed to write to PTY: {}", .{err});
+                        };
                     }
                     try self.redraw();
                 }
             },
         }
     }
+
     fn handleEvent(self: *Self, event: *c.xcb_generic_event_t) !void {
         const event_type = event.response_type & ~@as(u8, 0x80);
         switch (event_type) {
@@ -3457,8 +3445,13 @@ test "Term dirty row handling" {
 
 test "Term csi_ich" {
     const allocator = std.testing.allocator;
-    var term = try Term.init(allocator, .{ .mode = WinMode.initEmpty(), .tty_grid = rect.initGrid(10, 24) });
-    defer term.deinit();
+    var term = try Term.init(
+        allocator,
+        .{
+            .mode = WinMode.initEmpty(),
+            .tty_grid = rect.initGrid(10, 24),
+        },
+    );
 
     const chars = "ABCDEFGHIJ";
     for (chars, 0..) |cc, i| {
@@ -3466,7 +3459,7 @@ test "Term csi_ich" {
     }
     term.cursor.pos.addPosition(2, 0);
 
-    try term.csi_ich(&[_]u32{2});
+    try term.csi_ich(@ptrCast(@constCast(&[_]u32{2})));
     try std.testing.expectEqual('A', term.line[0][0].u);
     try std.testing.expectEqual('B', term.line[0][1].u);
     try std.testing.expectEqual(' ', term.line[0][2].u);

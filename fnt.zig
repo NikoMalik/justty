@@ -26,7 +26,6 @@ var font_name_buffer: [1][*c]const u8 = undefined;
 pub const RenderFont = struct {
     conn: *c.xcb_connection_t,
     font: *fcft.fcft_font,
-    // glyph: RasterizedGlyph,
     allocator: Allocator,
     dpi: f64,
 

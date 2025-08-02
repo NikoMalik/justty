@@ -1059,14 +1059,13 @@ extern "c" fn simd_contains_newline_or_non_ascii_or_quote(
 ) bool;
 
 extern "c" fn simd_index_of_csi_start(input: [*]const u8, len: usize) usize;
-extern "c" fn simd_extract_csi_sequence(input: [*]const u8, len: usize, start: usize, end: *usize) usize;
+pub extern "c" fn simd_extract_csi_sequence(input: [*]const u8, len: usize, start: usize, end: *usize) usize;
 extern "c" fn simd_parse_csi_params(
     csi: [*]const u8,
     len: usize,
     params: [*]i32,
     max_params: usize,
 ) usize;
-extern "c" fn simd_get_csi_command_type(csi: [*]const u8, len: usize) u8;
 extern "c" fn simd_is_valid_csi(input: [*]const u8, len: usize) bool;
 extern "c" fn simd_count_utf8_in_csi(csi: [*]const u8, len: usize) usize;
 extern "c" fn simd_last_index_of_byte(
